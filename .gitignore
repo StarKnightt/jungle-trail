@@ -1,0 +1,14 @@
+node_modules/
+
+# Tool output: several hundred captures, atlas dumps and offline WAV renders.
+# Over a gigabyte, and all of it reproducible from tools/.
+shots/
+
+# Throwaway scratch scripts and their output.
+tmp-*
+
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.env
+.env.*

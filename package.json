@@ -1,0 +1,14 @@
+{
+  "name": "jungle-trail",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "First-person jungle trail. Procedural everything, zero external assets.",
+  "scripts": {
+    "serve": "node tools/serve.mjs",
+    "shoot": "node tools/shoot.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.0"
+  }
+}
