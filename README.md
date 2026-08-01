@@ -108,7 +108,7 @@ common period and never audibly repeats.
 Honest version: this is not finished.
 
 - **In:** terrain, vegetation, lighting, ruins, character and audio.
-- **Being iterated:** water. It has had two passes and is still the weakest
+- **Being iterated:** water. It has had three passes and is still the weakest
   system. A blind critic currently scores it 4/10.
 - **Not done:** post-processing. No colour grading, no depth of field.
 
@@ -128,6 +128,8 @@ The zero-asset claim is a separate one, and it is airtight. There is no
 `XMLHttpRequest`, `new Image` or `createImageBitmap` anywhere in `src/`.
 
 ## How it was built
+
+The original brief this was built from is kept unedited in [PROMPT.md](PROMPT.md).
 
 Each system was built and then reviewed by a separate critic that saw only
 rendered screenshots and never the source. The critic scored photorealism against
