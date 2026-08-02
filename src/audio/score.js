@@ -17,7 +17,7 @@ import { clamp, smoothstep, dbToGain } from './dsp.js';
  * loudest and constant, birds clearly above the bed but intermittent, wind
  * mostly subliminal, and the falls given enough headroom to genuinely
  * dominate the last fifty metres — the brief's one explicit crescendo. */
-export const LEVELS = {
+export const DEFAULT_LEVELS = Object.freeze({
   cicada: -25,
   crickets: -30,
   insectEvent: -30,
@@ -39,9 +39,31 @@ export const LEVELS = {
    * live at normal volume, with the compressor never touched except by a
    * close call landing on the crescendo. */
   master: 4,
-};
+});
+
+/* The live engine and the offline renderer share this mutable view so an
+ * explicitly selected scenario can affect both. Keeping an immutable baseline
+ * beside it makes switching back to jungle deterministic in the same module,
+ * which matters to capture tools and tests that construct more than one game. */
+export const LEVELS = { ...DEFAULT_LEVELS };
 
 export const levelGain = (name) => dbToGain(LEVELS[name]);
+
+/* Scenario overrides, applied by main.js at boot. Both renderers read LEVELS
+ * at call time rather than caching, so mutating the table here changes the
+ * live engine and the offline WAV tool without either one re-syncing. */
+export function setLevelOverrides(o = {}) {
+  if (!o || typeof o !== 'object') return LEVELS;
+  for (const k of Object.keys(o)) {
+    if (Object.hasOwn(DEFAULT_LEVELS, k) && Number.isFinite(o[k])) LEVELS[k] = o[k];
+  }
+  return LEVELS;
+}
+
+export function resetLevelOverrides() {
+  Object.assign(LEVELS, DEFAULT_LEVELS);
+  return LEVELS;
+}
 
 /* Trail geometry the audio needs, without importing path.js — path.js pulls
  * in three, which Node (and therefore the WAV tool) does not have. The

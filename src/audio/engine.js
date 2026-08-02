@@ -119,7 +119,10 @@ export class Ambience {
       };
       d.addEventListener('pointerlockchange', tryUnlock);
       d.addEventListener('pointerdown', tryUnlock, { once: true });
-      this._detachDoc = () => d.removeEventListener('pointerlockchange', tryUnlock);
+      this._detachDoc = () => {
+        d.removeEventListener('pointerlockchange', tryUnlock);
+        d.removeEventListener('pointerdown', tryUnlock);
+      };
     }
 
     // Same convention as window.__game: the capture harness and anyone

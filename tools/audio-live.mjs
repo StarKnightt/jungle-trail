@@ -42,7 +42,7 @@ function note(ok, label, detail) {
   console.log(`  ${ok ? '✓' : '·'} ${label}${detail ? '  — ' + detail : ''}`);
 }
 
-await run({ width: 960, height: 540, hash: 'manual&tier=high' }, async ({ page }) => {
+const liveRun = await run({ width: 960, height: 540, hash: 'manual&tier=high' }, async ({ page }) => {
   /* Installed before anything is asked of the audio system. An unhandled
    * rejection is the exact shape a failed unlock takes — unlock() is async and
    * is called from an event listener that cannot await it — so catching them
@@ -272,6 +272,8 @@ await run({ width: 960, height: 540, hash: 'manual&tier=high' }, async ({ page }
   const rejects = await page.evaluate(() => window.__rejects);
   expect(rejects.length === 0, 'no unhandled promise rejections', rejects.join(' | ').slice(0, 200));
 });
+
+if (!liveRun.ok) fails.push('browser probe');
 
 console.log(fails.length ? `\n✗ ${fails.length} failed: ${fails.join('; ')}` : '\n✓ all live audio checks passed');
 finish(fails.length ? 1 : (process.exitCode || 0));

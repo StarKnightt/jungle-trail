@@ -13,9 +13,13 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript',
                 '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp' };
 
 http.createServer((rq, rs) => {
-  const rel = decodeURI(rq.url.split('?')[0]);
-  const f = path.join(ROOT, rel === '/' ? 'index.html' : rel);
-  if (!f.startsWith(ROOT)) { rs.writeHead(403); return rs.end(); }
+  let rel;
+  try { rel = decodeURIComponent(rq.url.split('?')[0]); }
+  catch (_) { rs.writeHead(400); return rs.end('bad request'); }
+  const f = path.resolve(ROOT, '.' + (rel === '/' ? '/index.html' : rel));
+  if (f !== ROOT && !f.startsWith(ROOT + path.sep)) {
+    rs.writeHead(403); return rs.end();
+  }
   fs.readFile(f, (e, d) => {
     if (e) { rs.writeHead(404, { 'content-type': 'text/plain' }); return rs.end('not found'); }
     rs.writeHead(200, { 'content-type': TYPES[path.extname(f)] || 'application/octet-stream',

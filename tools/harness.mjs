@@ -67,15 +67,19 @@ const CPU_ARGS = [
 ];
 
 export function serve(root = ROOT) {
+  const base = path.resolve(root);
+  const inside = (f) => f === base || f.startsWith(base + path.sep);
   const TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript',
     '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
     '.png': 'image/png',
   };
   return http.createServer((rq, rs) => {
-    const rel = decodeURI(rq.url.split('?')[0].split('#')[0]);
-    const f = path.join(root, rel === '/' ? 'index.html' : rel);
-    if (!f.startsWith(root)) { rs.writeHead(403); return rs.end(); }
+    let rel;
+    try { rel = decodeURIComponent(rq.url.split('?')[0].split('#')[0]); }
+    catch (_) { rs.writeHead(400); return rs.end('bad request'); }
+    const f = path.resolve(base, '.' + (rel === '/' ? '/index.html' : rel));
+    if (!inside(f)) { rs.writeHead(403); return rs.end(); }
     fs.readFile(f, (e, d) => {
       if (e) { rs.writeHead(404); return rs.end('not found'); }
       rs.writeHead(200, {
@@ -128,7 +132,7 @@ export async function run(opts, body) {
   if (bad.length) {
     console.error('✗ parse errors — not launching a browser:\n' + bad.join('\n'));
     process.exitCode = 1;
-    return { errs: bad, gl: null };
+    return { errs: bad, gl: null, ok: false };
   }
 
   let srv = null;
@@ -201,5 +205,5 @@ export async function run(opts, body) {
     [...new Set(errs)].slice(0, 15).forEach(e => console.log(' ', e));
   }
   process.exitCode = code;
-  return { errs: [...new Set(errs)], gl };
+  return { errs: [...new Set(errs)], gl, ok: code === 0 };
 }

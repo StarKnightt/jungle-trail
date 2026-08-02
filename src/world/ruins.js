@@ -1560,6 +1560,23 @@ export class Ruins {
     }
   }
 
+  dispose() {
+    if (this._disposed) return;
+    const geometries = new Set();
+    this.root.traverse((o) => { if (o.geometry) geometries.add(o.geometry); });
+    for (const g of geometries) g.dispose();
+    const disposeMap = (map) => {
+      if (!map) return;
+      if (map.userData?.rt) map.userData.rt.dispose();
+      else map.dispose?.();
+    };
+    for (const map of Object.values(this.material?.userData?.maps || {})) disposeMap(map);
+    this.material?.dispose();
+    this.root.remove(...this.root.children);
+    this.cells.length = 0;
+    this._disposed = true;
+  }
+
   stats() {
     return { blocks: this.blockCount, meshes: this.cells.length, tris: this.triangles };
   }

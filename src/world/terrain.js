@@ -17,7 +17,7 @@
 import * as THREE from 'three';
 import { Noise2D, clamp, smoothstep, lerp } from './noise.js';
 import { CLIFF_Z } from './path.js';
-import { DIRT, LITTER, ROCK, MACRO } from './groundTex.js';
+import { DIRT, LITTER, ROCK, MACRO, FLOAM, FALLEN, COOLROCK } from './groundTex.js';
 import { bakeSurface } from '../gfx/bake.js';
 import { SSTEP } from '../gfx/glsl.js';
 import {
@@ -589,6 +589,15 @@ export class Terrain {
     g.computeBoundingSphere();
     return g;
   }
+
+  dispose() {
+    if (!this.group) return;
+    const geometries = new Set();
+    this.group.traverse((o) => { if (o.geometry) geometries.add(o.geometry); });
+    for (const g of geometries) g.dispose();
+    this.group.remove(...this.group.children);
+    this.group = null;
+  }
 }
 
 /* ── material ──────────────────────────────────────────────────────────────
@@ -597,10 +606,19 @@ export class Terrain {
  * shadow, fog and tone-mapping chunks working, which is a very large amount of
  * correct code to not have to reimplement in order to blend three textures.
  */
-export function makeTerrainMaterial(renderer) {
-  const dirt = bakeSurface(renderer, DIRT, { size: 1024, normalStrength: 2.6 });
-  const litter = bakeSurface(renderer, LITTER, { size: 1024, normalStrength: 4.6 });
-  const rock = bakeSurface(renderer, ROCK, { size: 1024, normalStrength: 3.0 });
+/* The three ground surfaces per biome. `jungle` is the original trio; the
+ * forest set is the same construction with a temperate palette. The splat
+ * weights, the biplanar sampling and the wet/moss treatment are shared. */
+const GROUND_SETS = {
+  jungle: { dirt: DIRT, litter: LITTER, rock: ROCK },
+  forest: { dirt: FLOAM, litter: FALLEN, rock: COOLROCK },
+};
+
+export function makeTerrainMaterial(renderer, set = 'jungle') {
+  const S = Object.hasOwn(GROUND_SETS, set) ? GROUND_SETS[set] : GROUND_SETS.jungle;
+  const dirt = bakeSurface(renderer, S.dirt, { size: 1024, normalStrength: 2.6 });
+  const litter = bakeSurface(renderer, S.litter, { size: 1024, normalStrength: 4.6 });
+  const rock = bakeSurface(renderer, S.rock, { size: 1024, normalStrength: 3.0 });
   const macro = bakeSurface(renderer, MACRO, { size: 256, normal: false, orm: false });
 
   const mat = new THREE.MeshStandardMaterial({

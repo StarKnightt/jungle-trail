@@ -9,7 +9,8 @@
  *
  *   node tools/audio.mjs all                       # every demo + smoke test
  *   node tools/audio.mjs layers                    # each layer in isolation
- *   node tools/audio.mjs mix --t 0.55 [--secs 20]  # full mix at a trail point
+ *   node tools/audio.mjs mix --t 0.55 [--secs 20] [--scenario forest]
+ *                                                   # full mix at a trail point
  *   node tools/audio.mjs demo layer-falls-near     # a single named demo
  *   node tools/audio.mjs stats shots/audio/x.wav   # re-analyse an existing file
  *   node tools/audio.mjs smoke                     # engine.js on a mock graph
@@ -24,6 +25,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { renderScene, renderDemo, DEMOS } from '../src/audio/mix.js';
 import { Ambience } from '../src/audio/engine.js';
 import { bakeBank, bankJobs, bankBytes, DEFAULT_SEED } from '../src/audio/bank.js';
+import { SCENARIOS } from '../src/scenario.js';
+import { resetLevelOverrides, setLevelOverrides } from '../src/audio/score.js';
 import {
   WALK_SPEED, JOG_SPEED, JUMP_SPEED, gaitCycleRate, stepRate,
 } from '../src/player/gait.js';
@@ -31,6 +34,8 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = path.join(ROOT, 'shots', 'audio');
 const SR = 48000;
+let ACTIVE_SCENARIO = 'jungle';
+const outputSuffix = () => ACTIVE_SCENARIO === 'jungle' ? '' : `-${ACTIVE_SCENARIO}`;
 
 /* ------------------------------------------------------------------ WAV */
 
@@ -319,17 +324,24 @@ function saveDemo(name) {
   const t0 = performance.now();
   const { L, R } = renderDemo(name, SR);
   const ms = performance.now() - t0;
-  const file = path.join(OUT_DIR, `${name}.wav`);
+  const file = path.join(OUT_DIR, `${name}${outputSuffix()}.wav`);
   writeWav(file, SR, L, R);
-  console.log(`${name}.wav  (rendered in ${(ms / 1000).toFixed(1)}s, ` +
+  console.log(`${path.basename(file)}  (rendered in ${(ms / 1000).toFixed(1)}s, ` +
     `${(L.length / SR / (ms / 1000)).toFixed(1)}x realtime)`);
-  printStats(name, analyse(SR, L, R));
+  printStats(path.basename(file), analyse(SR, L, R));
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const cmd = args[0] || 'all';
   const flag = (k, dv) => { const i = args.indexOf('--' + k); return i < 0 ? dv : args[i + 1]; };
+  const scenarioName = flag('scenario', 'jungle') || 'jungle';
+  if (!Object.hasOwn(SCENARIOS, scenarioName)) {
+    throw new Error(`unknown scenario '${scenarioName}' — one of: ${Object.keys(SCENARIOS).join(', ')}`);
+  }
+  ACTIVE_SCENARIO = scenarioName;
+  resetLevelOverrides();
+  if (SCENARIOS[scenarioName].audio) setLevelOverrides(SCENARIOS[scenarioName].audio);
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   if (cmd === 'stats') {
@@ -344,7 +356,7 @@ async function main() {
   } else if (cmd === 'mix') {
     const t = +flag('t', 0.15), secs = +flag('secs', 20);
     const { L, R } = renderScene(SR, secs, { t0: t, walk: !args.includes('--static'), birdDensity: 0.25 });
-    const file = path.join(OUT_DIR, `mix-t${String(t).replace('.', '')}.wav`);
+    const file = path.join(OUT_DIR, `mix-t${String(t).replace('.', '')}${outputSuffix()}.wav`);
     writeWav(file, SR, L, R);
     printStats(path.basename(file), analyse(SR, L, R));
   } else if (cmd === 'layers') {
@@ -359,11 +371,11 @@ async function main() {
     console.log('');
     await smoke();
   } else {
-    console.error('usage: node tools/audio.mjs [all|layers|mix|demo|stats|smoke|jobs]');
+    console.error('usage: node tools/audio.mjs [all|layers|mix|demo|stats|smoke|jobs] [--scenario jungle|forest]');
     process.exit(1);
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => { console.error(e); process.exit(1); });
 }

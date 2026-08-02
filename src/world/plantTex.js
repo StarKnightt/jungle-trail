@@ -139,12 +139,53 @@ export function leafSpan(cell, vary, t) {
   return Math.min(1, w / 1.08);
 }
 
-/* uChannel: 0 albedo+alpha, 1 normal, 2 rough/translucency/alpha. */
-export const LEAF_FRAG = /* glsl */ `
+/* uChannel: 0 albedo+alpha, 1 normal, 2 rough/translucency/alpha.
+ *
+ * The palette block is injected per scenario: the whole atlas structure —
+ * shapes, damage, veins, cuticle — is shared, and only the paint changes.
+ * `jungle` is exactly the original values; `autumn` is the temperate
+ * deciduous set. Keeping them as GLSL consts in the prelude means the leaf
+ * geometry (leafSpan, plants.js) does not need a twin: the shape was never
+ * palette-dependent.
+ */
+export const LEAF_PALETTES = {
+  jungle: /* glsl */ `
+const vec3 LEAF_DEEP  = vec3(0.034, 0.077, 0.042);
+const vec3 LEAF_MID   = vec3(0.070, 0.137, 0.072);
+const vec3 LEAF_LITE  = vec3(0.126, 0.188, 0.104);
+const vec3 LEAF_VEIN  = vec3(0.155, 0.184, 0.082);
+const vec3 LEAF_RIB   = vec3(0.186, 0.206, 0.102);
+const vec3 LEAF_EDGE  = vec3(0.058, 0.094, 0.046);
+const vec3 LEAF_PALE  = vec3(0.158, 0.182, 0.096);
+const vec3 LEAF_CHLO  = vec3(0.228, 0.208, 0.100);
+const vec3 LEAF_NECR  = vec3(0.130, 0.084, 0.044);
+const vec3 LEAF_EPI   = vec3(0.124, 0.142, 0.108);
+const vec3 LEAF_EPIS  = vec3(0.086, 0.100, 0.062);
+const vec3 LEAF_FLUSH = vec3(0.174, 0.164, 0.100);
+`,
+  autumn: /* glsl */ `
+const vec3 LEAF_DEEP  = vec3(0.160, 0.045, 0.020);
+const vec3 LEAF_MID   = vec3(0.240, 0.100, 0.035);
+const vec3 LEAF_LITE  = vec3(0.330, 0.160, 0.055);
+const vec3 LEAF_VEIN  = vec3(0.300, 0.130, 0.045);
+const vec3 LEAF_RIB   = vec3(0.340, 0.160, 0.060);
+const vec3 LEAF_EDGE  = vec3(0.180, 0.070, 0.030);
+const vec3 LEAF_PALE  = vec3(0.300, 0.150, 0.060);
+const vec3 LEAF_CHLO  = vec3(0.420, 0.300, 0.090);
+const vec3 LEAF_NECR  = vec3(0.200, 0.100, 0.045);
+const vec3 LEAF_EPI   = vec3(0.240, 0.150, 0.080);
+const vec3 LEAF_EPIS  = vec3(0.200, 0.120, 0.060);
+const vec3 LEAF_FLUSH = vec3(0.360, 0.240, 0.110);
+`,
+};
+
+function leafFragSource(PALETTE_GLSL) {
+  return /* glsl */ `
 uniform int uChannel;
 uniform float uTexel;
 uniform float uNormalStrength;
 ${LEAF_COMMON}
+${PALETTE_GLSL}
 
 void leafSurf(vec2 uv, out vec3 alb, out float a, out float h, out float rough, out float trans){
   vec2 g = uv * ${ATLAS_N}.0;
@@ -353,14 +394,14 @@ void leafSurf(vec2 uv, out vec3 alb, out float a, out float h, out float rough, 
    * comparison because there is nothing warm left for them to be. Real
    * understory foliage is a restrained blue-green — the yellow-greens belong
    * to new flushes and to the canopy where there is light to make them. */
-  vec3 deep = vec3(0.034, 0.077, 0.042);
-  vec3 midC = vec3(0.070, 0.137, 0.072);
-  vec3 lite = vec3(0.126, 0.188, 0.104);
+  vec3 deep = LEAF_DEEP;
+  vec3 midC = LEAF_MID;
+  vec3 lite = LEAF_LITE;
   vec3 body = mix(deep, midC, mott);
   body = mix(body, lite, sstep(0.62, 1.0, mott) * 0.55);
   vec3 col = body;
-  col = mix(col, vec3(0.155, 0.184, 0.082), vein * 0.50 + retic * 0.14);
-  col = mix(col, vec3(0.186, 0.206, 0.102), midrib * 0.70);
+  col = mix(col, LEAF_VEIN, vein * 0.50 + retic * 0.14);
+  col = mix(col, LEAF_RIB, midrib * 0.70);
 
   /* The margin, and getting this wrong was half of the ringed-leaf problem.
    *
@@ -374,19 +415,19 @@ void leafSurf(vec2 uv, out vec3 alb, out float a, out float h, out float rough, 
    * than the body rather than darker. The vein sits deliberately inside the
    * alpha ramp at r = 0.93 so no part of it is ever in a texel that filtering
    * can smear outward past the silhouette. */
-  col = mix(col, vec3(0.058, 0.094, 0.046),
+  col = mix(col, LEAF_EDGE,
             sstep(0.84, 0.905, r) * sstep(0.945, 0.900, r) * 0.55);
-  col = mix(col, vec3(0.158, 0.182, 0.096),
+  col = mix(col, LEAF_PALE,
             sstep(0.56, 0.83, r) * sstep(0.92, 0.82, r) * 0.30);
   /* Chlorosis: the yellowing halo that spreads well beyond the dead tissue.
    * Held down in chroma on purpose. These blotches are the only warm marks in
    * an otherwise entirely green frame, so the eye finds every one of them, and
    * at full saturation a stand of understory leaves reads as a scatter of
    * orange stickers rather than as damage. */
-  col = mix(col, vec3(0.228, 0.208, 0.100), sstep(0.0, 0.22, dmg + bite) * 0.30);
-  col = mix(col, vec3(0.130, 0.084, 0.044), necro * 0.95);  // brown where chewed
-  col = mix(col, vec3(0.124, 0.142, 0.108), epi * 0.36);    // grey-green crust
-  col = mix(col, vec3(0.086, 0.100, 0.062), epiSpot * 0.55);
+  col = mix(col, LEAF_CHLO, sstep(0.0, 0.22, dmg + bite) * 0.30);
+  col = mix(col, LEAF_NECR, necro * 0.95);  // brown where chewed
+  col = mix(col, LEAF_EPI, epi * 0.36);     // crust
+  col = mix(col, LEAF_EPIS, epiSpot * 0.55);
   /* The pucker shows in the albedo as well as the normal, faintly. Relief that
    * exists only in the normal map disappears the moment a surface faces away
    * from every light, which under this canopy is most of them — and a blade
@@ -395,7 +436,7 @@ void leafSurf(vec2 uv, out vec3 alb, out float a, out float h, out float rough, 
   col *= 1.0 + crinkle * 0.055 + (retic - 0.25) * 0.05;
   // Roughly a third of the individuals carry a pale flush of new growth.
   float flush = step(0.66, fract(seed * 0.371));
-  col = mix(col, vec3(0.174, 0.164, 0.100), sstep(0.78, 1.0, t) * 0.24 * flush);
+  col = mix(col, LEAF_FLUSH, sstep(0.78, 1.0, t) * 0.24 * flush);
 
   /* Colour outside the blade is not "don't care", and assuming it was is what
    * put a hard pale rim on every leaf in the frame.
@@ -494,6 +535,13 @@ void main(){
   }
 }
 `;
+}
+
+/** The leaf atlas fragment for a scenario palette. */
+export function leafFrag(palette = 'jungle') {
+  const name = Object.hasOwn(LEAF_PALETTES, palette) ? palette : 'jungle';
+  return leafFragSource(LEAF_PALETTES[name]);
+}
 
 /* Bark.
  *

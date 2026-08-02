@@ -38,10 +38,36 @@ Playwright. The game itself does not need it.
 | W A S D | Move |
 | Shift | Sprint |
 | Space | Jump |
+| Esc | Pause; resume, change scenario or exit to the start menu |
 | 1 - 5 | Teleport along the trail |
 
 The teleport keys are 1 trailhead, 2 mid trail, 3 ruins approach, 4 temple
 clearing, 5 the falls.
+
+During play the upper-left panel reports FPS and CPU/GPU frame load. GPU is
+shown as `n/d` when the browser does not expose a WebGL timer query.
+
+## Scenarios
+
+The same world-builder spine serves more than one biome. Opening the app without
+a scenario hash shows a picker for the original jungle and the temperate autumn
+forest. The choice can also be deep-linked by appending a hash:
+
+```
+#forest            → the autumn forest
+#scenario=forest   → same thing, spelled out
+#scenario=forest&tier=low   → forest at the low quality tier
+```
+
+Each scenario in `src/scenario.js` swaps the authored layers that make a
+biome: the ground surfaces that bake, the leaf-atlas palette, the vegetation
+weights, the atmosphere (fog, hemisphere light, sun) and the audio score. The
+jungle entry preserves the original tuning and default output; the capture
+tools drive the same hash, so
+`#scenario=forest&manual` is the deterministic way to point the harness at
+the forest. Offline audio renders accept the same choice explicitly, for
+example `node tools/audio.mjs mix --scenario forest`; forest WAVs get a
+`-forest` suffix so they cannot overwrite the jungle references.
 
 ![Mid trail](media/02-mid-trail.jpg)
 

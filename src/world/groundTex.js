@@ -279,6 +279,164 @@ void surf(vec2 uv, out vec3 albedo, out float height, out float rough, out float
 }
 `;
 
+
+/* ── Temperate trail loam (forest set) ──────────────────────────────────────
+ * The same worn-dirt job as DIRT, but the soil is a brown loam with a cool
+ * cast rather than a red tropical clay: fewer stones, more roots, and autumn
+ * leaf fragments trodden into the surface. Same tiling contract as the rest
+ * of the file: p = uv * 8 and every noise period equals the scale on p.
+ */
+export const FLOAM = HELP + /* glsl */ `
+void surf(vec2 uv, out vec3 albedo, out float height, out float rough, out float ao){
+  vec2 p = uv * 8.0;
+
+  float mass   = unit(pfbm(p * 0.5, 4.0,  3));
+  float loam   = unit(pfbm(p,       8.0,  5));
+  float coarse = unit(pfbm(p * 4.0, 32.0, 4));
+
+  float root = sstep(0.86, 0.96, unit(pfbm(p * 1.2, 9.6, 3)));
+  float stone = sstep(0.62, 0.86, mass);
+  vec2 w1 = pworley(p * 6.0, 48.0);
+  float pebble = sstep(0.12 + 0.20 * coarse, 0.03, w1.x) * stone;
+
+  vec3 deep   = vec3(0.030, 0.024, 0.018);
+  vec3 mid    = vec3(0.070, 0.054, 0.034);
+  vec3 pale   = vec3(0.115, 0.090, 0.058);
+  vec3 stn    = vec3(0.240, 0.214, 0.170);
+  vec3 rootC  = vec3(0.120, 0.082, 0.050);
+
+  vec3 alb = mix(deep, mid, mass);
+  alb = mix(alb, pale, sstep(0.60, 0.95, loam) * 0.55);
+  alb = mix(alb, stn, pebble * 0.55);
+  alb = mix(alb, rootC, root * 0.85);
+
+  // Autumn litter trodden into the tread, in the same palette as FALLEN.
+  float bits = sstep(0.70, 0.90, unit(pfbm(p * 8.0, 64.0, 3)));
+  alb = mix(alb, vec3(0.240, 0.140, 0.060), bits * 0.30);
+
+  float wet = sstep(0.60, 0.90, unit(pfbm(p * 2.0, 16.0, 3)));
+  alb = mix(alb, vec3(0.016, 0.014, 0.011), wet * 0.55);
+
+  float burnish = sstep(0.62, 0.88, unit(pfbm(p * 1.5, 12.0, 3))) * (1.0 - wet);
+  height = 0.5 + (loam - 0.5) * 0.5 + pebble * 0.22 + root * 0.18;
+  height = mix(height, mix(height, 0.44, 0.7), burnish);
+
+  rough = mix(0.95, 0.16, wet);
+  rough = mix(rough, 0.70, burnish * 0.8);
+  rough = mix(rough, 0.64, pebble * 0.45);
+  rough = mix(rough, 0.50, root * 0.7);
+
+  albedo = alb;
+  ao = 1.0 - wet * 0.28 - (1.0 - height) * 0.35;
+}
+`;
+
+/* ── Autumn broadleaf litter (forest set) ───────────────────────────────────
+ * The same five-layer construction as LITTER, but the blades are bigger and
+ * broader — deciduous trees shed whole leaves, not shreds — and the palette
+ * is copper and rust instead of tan and olive.
+ */
+export const FALLEN = HELP + /* glsl */ `
+void surf(vec2 uv, out vec3 albedo, out float height, out float rough, out float ao){
+  vec2 p = uv * 8.0;
+
+  vec4 l0 = leafField(p * 0.45, vec2(3.6),  41.0, 0.60, 0.52);   // rare big blade
+  vec4 l1 = leafField(p,        vec2(8.0),  0.0,  0.55, 0.48);
+  vec4 l2 = leafField(p * 1.6,  vec2(12.8), 7.3,  0.50, 0.42);
+  vec4 l3 = leafField(p * 2.6,  vec2(20.8), 3.1,  0.60, 0.34);   // fragments
+  vec4 tw = leafField(p * 1.6,  vec2(12.8), 23.9, 0.95, 0.045);  // stalks
+
+  float soil = unit(pfbm(p * 2.0, 16.0, 5));
+  float rot  = unit(pfbm(p * 4.0, 32.0, 4));
+
+  vec3 humus = mix(vec3(0.050, 0.038, 0.028), vec3(0.110, 0.082, 0.050), soil);
+
+  // Charcoal where it has been down all winter, copper where it is fresh,
+  // and a thin olive line for the leaf that is only just turning.
+  vec3 black = vec3(0.070, 0.052, 0.036);
+  vec3 deep  = vec3(0.170, 0.096, 0.052);
+  vec3 mid   = vec3(0.300, 0.150, 0.066);
+  vec3 fresh = vec3(0.470, 0.210, 0.070);
+  vec3 olive = vec3(0.220, 0.170, 0.070);
+
+  vec3 col = humus;
+  height = soil * 0.18;
+
+  col = mix(col, mix(black, deep, l3.z * rot), l3.x);
+  height = mix(height, 0.26 + l3.y * 0.08,     l3.x);
+
+  col = mix(col, mix(deep, mid, l2.z),         l2.x);
+  height = mix(height, 0.42 + l2.y * 0.10,     l2.x);
+
+  col = mix(col, mix(mix(black, mid, rot), fresh, l1.z), l1.x);
+  height = mix(height, 0.58 + l1.y * 0.12,     l1.x);
+
+  col = mix(col, mix(olive, fresh, l0.z),      l0.x);
+  height = mix(height, 0.74 + l0.y * 0.14,     l0.x);
+
+  col = mix(col, vec3(0.120, 0.078, 0.048),    tw.x);
+  height = mix(height, 0.88,                   tw.x);
+
+  float rim = max(max(l1.x - l1.w, l2.x - l2.w), l0.x - l0.w);
+  float edge = sstep(0.35, 0.85, rim) * sstep(1.0, 0.55, rim);
+  height += edge * 0.20;
+
+  float ribs = max(max(l0.w, l1.w), max(l2.w, l3.w));
+  col = mix(col, col * 1.5 + 0.015, ribs * 0.55);
+  height += ribs * 0.05;
+
+  albedo = col;
+  float blade = max(max(l0.x, l1.x), l2.x);
+  rough = mix(0.95, 0.62, blade * 0.85 * (1.0 - rot * 0.5));
+  ao = 1.0 - (1.0 - height) * 0.78;
+}
+`;
+
+/* ── Cool wet rock (forest set) ─────────────────────────────────────────────
+ * The same bedding/grain/block construction as ROCK, but cooler and greyer
+ * and carrying heavier, greener lichen — the temperate look against the
+ * tropical tan crust.
+ */
+export const COOLROCK = HELP + /* glsl */ `
+void surf(vec2 uv, out vec3 albedo, out float height, out float rough, out float ao){
+  vec2 p = uv * 8.0;
+
+  float warp = pfbm(p, 8.0, 4) * 1.6;
+  float strata = pfbm(vec2(p.x * 0.5, p.y * 3.0 + warp), vec2(4.0, 24.0), 4);
+  float bed = abs(strata);
+
+  vec2 agg = pworley(p * 8.0, 64.0);
+  float grain = sstep(0.30, 0.0, agg.y - agg.x);
+
+  vec2 blk = pworley(p * 2.0, 16.0);
+  float blocks = sstep(0.26, 0.03, blk.y - blk.x);
+
+  float chip = unit(pfbm(p * 12.0, 96.0, 3));
+
+  height = 0.5 + strata * 0.26 - blocks * 0.40 - grain * 0.08 + chip * 0.08;
+
+  vec3 pale = vec3(0.360, 0.360, 0.340);
+  vec3 dark = vec3(0.120, 0.118, 0.116);
+  vec3 warm = vec3(0.240, 0.208, 0.160);
+
+  albedo = mix(dark, pale, contrast(bed, 1.5));
+  albedo = mix(albedo, warm, chip * 0.30);
+  albedo *= 1.0 - blocks * 0.42;
+
+  float drip = unit(pfbm(vec2(p.x * 2.0, p.y * 0.5), vec2(16.0, 4.0), 4));
+  float seep = sstep(0.35, 0.85, blocks * 0.6 + drip * 0.7);
+  albedo *= 1.0 - seep * 0.38;
+
+  // Cooler, greener lichen than the tropical mineral crust.
+  float lichen = sstep(0.58, 0.82, unit(pfbm(p * 3.0, 24.0, 4))) * (1.0 - blocks);
+  albedo = mix(albedo, vec3(0.380, 0.430, 0.330), lichen * 0.50);
+
+  rough = mix(0.88, 0.26, seep);
+  rough = mix(rough, 0.95, lichen * 0.6);
+  ao = 1.0 - blocks * 0.55 - grain * 0.15;
+}
+`;
+
 /* Macro variation.
  * Tiling is not defeated by better tiles. However good a 1024 map is, the eye
  * finds the repeat within a couple of periods because the *average* colour of

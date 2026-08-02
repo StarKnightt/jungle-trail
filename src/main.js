@@ -6,6 +6,8 @@
  * load-bearing rather than debug convenience.
  */
 import * as THREE from 'three';
+import { SCENARIOS, explicitScenarioFor, scenarioFor } from './scenario.js';
+import { resetLevelOverrides, setLevelOverrides } from './audio/score.js';
 import { Trail } from './world/path.js';
 import { Terrain, makeTerrainMaterial } from './world/terrain.js';
 import { Sky } from './render/sky.js';
@@ -40,8 +42,10 @@ const TIERS = {
 const TIER_ORDER = ['low', 'medium', 'high', 'ultra'];
 
 class Game {
-  constructor(canvas) {
+  constructor(canvas, onProgress = null, onMetrics = null) {
     this.canvas = canvas;
+    this._onProgress = onProgress;
+    this._onMetrics = onMetrics;
     this.clock = new THREE.Clock();
     this.paused = false;
     this.running = false;
@@ -50,19 +54,51 @@ class Game {
     this._frames = 0;
     this._fpsT = 0;
     this._stableFor = 0;
+    /* Telemetry is intentionally split into what JavaScript can measure and
+     * what WebGL can measure. CPU is the time spent stepping and submitting a
+     * frame; GPU is an EXT_disjoint_timer_query measurement when the browser
+     * exposes one. Neither is pretending to be an operating-system process
+     * percentage. */
+    this._cpuMs = NaN;
+    this._gpuMs = NaN;
+    this._gpuTimer = null;
 
     const hash = new URLSearchParams(location.hash.slice(1));
-    this.pinnedTier = TIER_ORDER.includes(location.hash.slice(1)) ? location.hash.slice(1)
-                    : hash.get('tier');
+    const bareHash = location.hash.slice(1);
+    const bareFlag = bareHash.split('&', 1)[0];
+    const requestedTier = hash.get('tier');
+    this.pinnedTier = TIER_ORDER.includes(bareFlag) ? bareFlag
+                    : TIER_ORDER.includes(requestedTier) ? requestedTier : null;
     this.tier = this.pinnedTier || 'high';
     /* The user of this machine games on it. An uncapped loop on an RTX-class
      * card will happily render this at 300 fps and pull 150 W to do it, for a
      * scene that is a walking pace nature documentary. 60 is the target and
      * the cap. */
-    this.frameCap = Number(hash.get('fps')) || 60;
+    const requestedFps = Number(hash.get('fps'));
+    this.frameCap = Number.isFinite(requestedFps) && requestedFps > 0
+      ? Math.min(240, Math.max(1, requestedFps)) : 60;
 
+    /* The scenario is the biome: `#forest`, `#scenario=forest` or default
+     * jungle. It drives the atmosphere, the ground and leaf palettes, the
+     * vegetation weights and the audio score below. */
+    this.scenario = SCENARIOS[scenarioFor(location.hash)];
+  }
+
+  _progress(percent, status) { this._onProgress?.(percent, status); }
+
+  _yieldBoot() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
+      else setTimeout(resolve, 0);
+    });
+  }
+
+  async init() {
+    this._progress(4, 'Preparing the renderer…');
     this._initRenderer();
-    this._initScene();
+    await this._yieldBoot();
+    await this._initScene();
+    this._progress(100, 'Ready');
   }
 
   _initRenderer() {
@@ -99,18 +135,92 @@ class Game {
     r.setPixelRatio(Math.min(devicePixelRatio, TIERS[this.tier].dpr));
     r.setSize(innerWidth, innerHeight, false);
     this.renderer = r;
+    this._initGpuTimer();
 
-    addEventListener('resize', () => this.resize());
+    this._onResize = () => this.resize();
+    addEventListener('resize', this._onResize);
   }
 
-  _initScene() {
+  _initGpuTimer() {
+    const gl = this.renderer?.getContext?.();
+    const ext = gl?.getExtension?.('EXT_disjoint_timer_query_webgl2');
+    if (!gl || !ext || typeof gl.createQuery !== 'function') return;
+    this._gpuTimer = { gl, ext, active: null, pending: null };
+  }
+
+  _pollGpuTimer() {
+    const timer = this._gpuTimer;
+    if (!timer?.pending) return;
+    const { gl, ext, pending } = timer;
+    try {
+      if (!gl.getQueryParameter(pending, gl.QUERY_RESULT_AVAILABLE)) return;
+      const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT);
+      if (!disjoint) {
+        const ns = Number(gl.getQueryParameter(pending, gl.QUERY_RESULT));
+        if (Number.isFinite(ns)) this._gpuMs = ns / 1e6;
+      }
+      gl.deleteQuery(pending);
+      timer.pending = null;
+    } catch (_) {
+      /* Context loss or an incomplete extension must not break the render loop. */
+      try { gl.deleteQuery(pending); } catch (_) { /* already gone */ }
+      timer.pending = null;
+    }
+  }
+
+  _beginGpuTimer() {
+    const timer = this._gpuTimer;
+    if (!timer || timer.active || timer.pending) return;
+    try {
+      const query = timer.gl.createQuery();
+      timer.gl.beginQuery(timer.ext.TIME_ELAPSED_EXT, query);
+      timer.active = query;
+    } catch (_) {
+      timer.active = null;
+    }
+  }
+
+  _endGpuTimer() {
+    const timer = this._gpuTimer;
+    if (!timer?.active) return;
+    try {
+      timer.gl.endQuery(timer.ext.TIME_ELAPSED_EXT);
+      timer.pending = timer.active;
+      timer.active = null;
+    } catch (_) {
+      try { timer.gl.deleteQuery(timer.active); } catch (_) { /* already gone */ }
+      timer.active = null;
+    }
+  }
+
+  _disposeGpuTimer() {
+    const timer = this._gpuTimer;
+    if (!timer) return;
+    try {
+      if (timer.active) timer.gl.endQuery(timer.ext.TIME_ELAPSED_EXT);
+    } catch (_) { /* context may already be lost */ }
+    for (const query of [timer.active, timer.pending]) {
+      if (query) {
+        try { timer.gl.deleteQuery(query); } catch (_) { /* already gone */ }
+      }
+    }
+    this._gpuTimer = null;
+  }
+
+  _recordCpu(ms) {
+    this._cpuMs = Number.isFinite(this._cpuMs) ? this._cpuMs * 0.82 + ms * 0.18 : ms;
+  }
+
+  async _initScene() {
+    this._progress(9, 'Setting the sky and sunlight…');
     const scene = new THREE.Scene();
     this.scene = scene;
 
     this.camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.08, 900);
 
     this.sky = new Sky(this.renderer);
-    this.sky.setSun(38, 152);
+    this.sky.setSun(this.scenario.atmosphere.sunEl, this.scenario.atmosphere.sunAz);
+    this.sky.setAtmosphere(this.scenario.atmosphere);
     scene.add(this.sky.mesh);
 
     /* Depth cue. Real jungle air is thick with water vapour and the visibility
@@ -136,7 +246,8 @@ class Game {
      * sage as they receded — the middle distance was not losing detail
      * gradually, it was being clamped flat. A darker, greyer haze lets the far
      * boles keep their silhouettes while still closing the corridor off. */
-    scene.fog = new THREE.FogExp2(0x323c2c, 0.038);
+    scene.fog = new THREE.FogExp2(this.scenario.atmosphere.fogColor,
+                                  this.scenario.atmosphere.fogDensity);
 
     const sl = this.sky.sunLight();
     this.sun = new THREE.DirectionalLight(sl.color, sl.intensity);
@@ -217,8 +328,13 @@ class Game {
      * puts a well of light under itself and a thick one does not. This is what
      * is left: the isotropic floor under everything, which still has to exist,
      * because there is no black in a jungle shadow. */
-    this.hemi = new THREE.HemisphereLight(0x82a081, 0x63513a, 0.55);
+    this.hemi = new THREE.HemisphereLight(this.scenario.atmosphere.hemiSky,
+                                          this.scenario.atmosphere.hemiGround,
+                                          this.scenario.atmosphere.hemiIntensity);
     scene.add(this.hemi);
+
+    this._progress(17, 'Sculpting the trail…');
+    await this._yieldBoot();
 
     /* The scene used to carry a second, weak, unshadowed DirectionalLight here
      * standing in for skylight that had been through the canopy. It has been
@@ -241,8 +357,11 @@ class Game {
      * the stone and refuse to grow through it. */
     this.ruinPlan = new RuinPlan(this.trail);
     this.terrain = new Terrain(this.trail, undefined, this.ruinPlan);
-    this.terrainMat = makeTerrainMaterial(this.renderer);
+    this.terrainMat = makeTerrainMaterial(this.renderer, this.scenario.groundSet);
     scene.add(this.terrain.build(this.terrainMat));
+
+    this._progress(34, 'Building the ancient ruins…');
+    await this._yieldBoot();
 
     /* Solids are registered while their procedural generators still know
      * what each merged or instanced piece represents. Keeping this registry
@@ -255,8 +374,13 @@ class Game {
     scene.add(this.ruins.root);
 
     this.veg = new Vegetation(this.renderer, this.terrain, this.trail, undefined,
-                              this.ruins, this.collision);
+                              this.ruins, this.collision,
+                              { palette: this.scenario.leafPalette,
+                                tuning: this.scenario.vegetation });
     scene.add(this.veg.root);
+
+    this._progress(64, 'Growing the surrounding vegetation…');
+    await this._yieldBoot();
 
     /* Built after the vegetation, and the order matters even though water
      * grows nothing. Every surface in it is clipped per fragment against the
@@ -269,6 +393,9 @@ class Game {
                            { tier: this.tier });
     scene.add(this.water.root);
 
+    this._progress(75, 'Adding water and surface details…');
+    await this._yieldBoot();
+
     this.sky.bake(scene);
     /* The environment map is the open sky, and under a roof of leaves only a
      * fraction of it is visible from any surface. Handing surfaces the full
@@ -277,7 +404,7 @@ class Game {
      * was coming from: those blades are near-horizontal and face straight up
      * into it. The hemisphere light above carries the fill instead, because
      * its upper colour is the underside of the canopy rather than the sky. */
-    scene.environmentIntensity = 0.34;
+    scene.environmentIntensity = this.scenario.atmosphere.envIntensity;
 
     this.walker = new Walker(this.camera, this.terrain, this.trail,
                              this.collision).attach(this.canvas);
@@ -290,6 +417,9 @@ class Game {
      * without rebuilding the character or accepting doubled limbs. */
     this.camera.layers.enable(BODY_FIRST_PERSON_LAYER);
 
+    this._progress(86, 'Finishing the atmosphere and lighting…');
+    await this._yieldBoot();
+
     /* Everything above builds surfaces; everything below decides how they are
      * lit. The order is forced — the field has to be sampled from a terrain
      * that has finished building, and the materials have to exist before they
@@ -299,6 +429,7 @@ class Game {
     this.canopy = new Canopy(this.renderer, this.field);
     this.canopy.setSun(this.sky.sunDir);
     this.atmos = new Atmosphere(this.renderer, this.canopy);
+    this.atmos.setMistAmbient(this.scenario.atmosphere.mistAmbient);
     this.atmos.setTier(this.tier);
     this._syncAtmosphereSize();
 
@@ -311,6 +442,9 @@ class Game {
                      ...this.body.materials]) {
       patchCanopyLight(m, this.canopy);
     }
+
+    this._progress(94, 'Preparing the soundscape…');
+    await this._yieldBoot();
 
     /* Nothing is allocated on the audio device here and no buffer is
      * synthesized: constructing Ambience only chains the walker's footfall
@@ -336,6 +470,11 @@ class Game {
      * in front of you is. */
     this.ambience.setWaterfallPosition(IMPACT, LIP);
     this.atmos.setFallsPlume(IMPACT);
+    /* The scenario's score overrides (a temperate wood is birds and wind,
+     * not cicadas) land here, after the engine exists but before any gain is
+     * ever evaluated — the unlock happens on the first pointer lock. */
+    resetLevelOverrides();
+    if (this.scenario.audio) setLevelOverrides(this.scenario.audio);
   }
 
   _configureShadow() {
@@ -440,6 +579,8 @@ class Game {
 
   render() {
     const r = this.renderer;
+    this._pollGpuTimer();
+    this._beginGpuTimer();
     /* The materials reconstruct world position from vViewPosition, so they
      * need the camera's world matrix as a uniform. Set once per frame here
      * rather than per material, because they all share the same uniform
@@ -459,6 +600,7 @@ class Game {
     this._sceneCalls = r.info.render.calls;
     this._sceneTris = r.info.render.triangles;
     this.atmos.finish(this.camera, this.sun.color, this.sun.intensity);
+    this._endGpuTimer();
   }
 
   renderOnce() { this.render(); }
@@ -483,8 +625,11 @@ class Game {
       const step = this._acc;
       this._acc = 0;
 
+      const cpuStart = performance.now();
       this.step(step);
       this.render();
+      this._recordCpu(performance.now() - cpuStart);
+      this._onMetrics?.(this.metrics());
 
       this._frames++;
       this._fpsT += step;
@@ -500,6 +645,17 @@ class Game {
   setPaused(p) {
     this.paused = !!p;
     this.ambience?.setPaused(this.paused);
+  }
+
+  metrics() {
+    const budget = 1000 / this.frameCap;
+    const percent = (ms) => Number.isFinite(ms) ? (100 * ms / budget) : null;
+    return {
+      fps: this.fps,
+      cpu: percent(this._cpuMs),
+      gpu: percent(this._gpuMs),
+      gpuTimed: !!this._gpuTimer,
+    };
   }
 
   /** Advance the simulation without waiting for wall-clock time. */
@@ -580,48 +736,237 @@ class Game {
   }
 
   dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.running = false;
     cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    this._disposeGpuTimer();
+    if (this._onResize) {
+      removeEventListener('resize', this._onResize);
+      this._onResize = null;
+    }
     this.ambience?.dispose();
-    this.walker.dispose();
-    this.body.dispose();
+    this.walker?.dispose();
+    this.body?.dispose();
+    this.water?.dispose();
+    this.veg?.dispose();
+    this.ruins?.dispose();
+    this.terrain?.dispose();
+    for (const map of Object.values(this.terrainMat?.userData?.maps || {})) map.dispose?.();
+    this.terrainMat?.dispose();
+    if (this.scene) this.scene.environment = null;
+    this.sky?.dispose();
     this.atmos?.dispose();
     this.canopy?.dispose();
-    this.renderer.dispose();
+    this.renderer?.dispose();
   }
 }
 
 const _size = new THREE.Vector2();
 
-const game = new Game(document.getElementById('view'));
-window.__game = game;
-window.THREE = THREE;
-
-/* Recording convenience: number keys jump to the authored viewpoints.
- *
- * The falls are eight minutes of walking from the trailhead, which is the
- * right length for the level and the wrong length for the twentieth take of a
- * capture. These reuse goTo() rather than moving the camera themselves, so a
- * warp lands in exactly the state the harness's stops land in — snapped to the
- * heightfield, facing along the trail, velocity zeroed, gait clock reset.
- *
- * Nothing is drawn and nothing is logged. The frame has no UI in it at all,
- * and a debug aid is the last thing that should be the exception. Delete this
- * block for a public build; the feature is nowhere else.
- */
+const canvas = document.getElementById('view');
+const menu = document.getElementById('scenario-menu');
+const telemetry = document.getElementById('telemetry');
+const fpsValue = document.getElementById('fps-value');
+const cpuValue = document.getElementById('cpu-value');
+const gpuValue = document.getElementById('gpu-value');
+const pauseMenu = document.getElementById('pause-menu');
+const pauseResume = document.getElementById('pause-resume');
+const pauseExit = document.getElementById('pause-exit');
+const bootLabel = document.getElementById('boot');
+const bootStatus = document.getElementById('boot-status');
+const bootFill = document.getElementById('boot-fill');
+const bootPercent = document.getElementById('boot-percent');
+const isManual = /(^|[#&])manual(&|$)/.test(location.hash);
+let game = null;
+let bootPromise = null;
+let removeDebugControls = null;
 const WARP_STOPS = [0.04, 0.34, 0.81, 0.88, 0.96];
-addEventListener('keydown', (e) => {
-  /* Only while the pointer is locked. A digit typed at a page that merely has
-   * focus is not a request to move the player, and gating on the same flag the
-   * walker uses means the capture harness — which drives goTo() directly and
-   * never sends key events — cannot be perturbed by this at all. */
-  if (!game.walker.enabled) return;
-  const key = /^Digit([1-9])$/.exec(e.code);
-  const t = key && WARP_STOPS[+key[1] - 1];
-  if (t === undefined || t === null) return;
-  game.goTo(t);
+
+function showBootProgress(percent, status) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  if (bootLabel) bootLabel.hidden = false;
+  if (bootStatus) bootStatus.textContent = status;
+  if (bootFill) bootFill.style.width = `${value}%`;
+  if (bootPercent) bootPercent.textContent = `${value}%`;
+}
+
+function showTelemetry() {
+  if (!isManual) {
+    telemetry?.removeAttribute('hidden');
+    updateTelemetry();
+  }
+}
+
+function hideTelemetry() {
+  telemetry?.setAttribute('hidden', '');
+}
+
+function metricText(value, suffix = '') {
+  return Number.isFinite(value) ? `${Math.round(value)}${suffix}` : 'n/d';
+}
+
+function updateTelemetry(metrics = game?.metrics()) {
+  if (!metrics || telemetry?.hidden) return;
+  fpsValue.textContent = metricText(metrics.fps);
+  cpuValue.textContent = metricText(metrics.cpu, '%');
+  gpuValue.textContent = metricText(metrics.gpu, '%');
+  gpuValue.title = metrics.gpuTimed
+    ? 'GPU: WebGL timer query, rapportato al budget del frame'
+    : 'GPU: misura non disponibile in questo browser';
+}
+
+function refreshTelemetry() {
+  if (!telemetry) return;
+  updateTelemetry();
+  window.setTimeout(refreshTelemetry, 250);
+}
+
+function writeScenarioHash(id) {
+  const keep = location.hash.slice(1).split('&').filter(Boolean).filter((part) =>
+    part === 'manual' || /^(?:tier|fps)=/.test(part));
+  const next = [`scenario=${encodeURIComponent(id)}`, ...keep].join('&');
+  history.replaceState(null, '', `#${next}`);
+}
+
+function hidePauseMenu() {
+  pauseMenu?.setAttribute('hidden', '');
+}
+
+function showPauseMenu() {
+  if (!game || !game.running || !bootLabel?.hidden) return;
+  game.setPaused(true);
+  document.exitPointerLock?.();
+  hideTelemetry();
+  pauseMenu?.removeAttribute('hidden');
+  pauseResume?.focus({ preventScroll: true });
+}
+
+function resumeGame() {
+  if (!game || !game.running) return;
+  hidePauseMenu();
+  game.setPaused(false);
+  showTelemetry();
+  /* Re-locking from a button click is allowed as a user gesture. If the
+   * browser declines it, the canvas click handler remains the fallback. */
+  const request = canvas?.requestPointerLock?.();
+  request?.catch?.(() => {});
+}
+
+function destroyGame() {
+  document.exitPointerLock?.();
+  removeDebugControls?.();
+  removeDebugControls = null;
+  game?.dispose();
+  game = null;
+  window.__game = null;
+  hideTelemetry();
+}
+
+function showScenarioMenu() {
+  hidePauseMenu();
+  if (bootLabel) bootLabel.hidden = true;
+  menu?.removeAttribute('hidden');
+  menu?.querySelector('[data-scenario]')?.focus({ preventScroll: true });
+}
+
+function exitToScenarioMenu() {
+  destroyGame();
+  history.replaceState(null, '', `${location.pathname}${location.search}`);
+  showScenarioMenu();
+}
+
+function teleportTo(activeGame, index, fromKeyboard = false) {
+  if (!activeGame || !activeGame.running || activeGame.paused) return false;
+  if (fromKeyboard && !activeGame.walker?.enabled) return false;
+  const t = WARP_STOPS[index];
+  if (t === undefined) return false;
+  activeGame.goTo(t);
+  return true;
+}
+
+function wireDebugControls(activeGame) {
+  /* The same authored viewpoints are exposed as keyboard shortcuts and as
+   * buttons, so the player never has to guess an undocumented debug command. */
+  const onKeydown = (e) => {
+    const key = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
+    if (!key) return;
+    if (teleportTo(activeGame, +key[1] - 1, true)) e.preventDefault();
+  };
+  addEventListener('keydown', onKeydown);
+  const buttons = [...(telemetry?.querySelectorAll('[data-teleport]') || [])];
+  const buttonHandlers = buttons.map((button) => {
+    const onClick = () => teleportTo(activeGame, Number(button.dataset.teleport) - 1);
+    button.addEventListener('click', onClick);
+    return [button, onClick];
+  });
+  return () => {
+    removeEventListener('keydown', onKeydown);
+    for (const [button, onClick] of buttonHandlers) button.removeEventListener('click', onClick);
+  };
+}
+
+async function bootGame() {
+  if (game) return game;
+  if (bootPromise) return bootPromise;
+
+  menu?.setAttribute('hidden', '');
+  showBootProgress(0, 'Starting your trail…');
+  const activeGame = new Game(canvas, showBootProgress, updateTelemetry);
+  bootPromise = (async () => {
+    try {
+      await activeGame.init();
+      game = activeGame;
+      window.__game = game;
+      window.THREE = THREE;
+      removeDebugControls = wireDebugControls(game);
+      if (!isManual) game.begin();
+      if (bootLabel) bootLabel.hidden = true;
+      showTelemetry();
+      return game;
+    } catch (error) {
+      console.error('[boot] failed:', error);
+      activeGame.dispose();
+      hideTelemetry();
+      menu?.removeAttribute('hidden');
+      showBootProgress(0, 'Unable to load the trail. Choose a scenario to retry.');
+      return null;
+    } finally {
+      bootPromise = null;
+    }
+  })();
+  return bootPromise;
+}
+
+function chooseScenario(id) {
+  if (!Object.hasOwn(SCENARIOS, id)) return;
+  if (game) destroyGame();
+  hidePauseMenu();
+  writeScenarioHash(id);
+  void bootGame();
+}
+
+menu?.querySelectorAll('[data-scenario]').forEach((button) => {
+  button.addEventListener('click', () => chooseScenario(button.dataset.scenario));
 });
 
-// The harness calls begin() itself so it can set state before the first frame.
-if (!/(^|[#&])manual(&|$)/.test(location.hash)) game.begin();
+pauseResume?.addEventListener('click', resumeGame);
+pauseExit?.addEventListener('click', exitToScenarioMenu);
+pauseMenu?.querySelectorAll('[data-pause-scenario]').forEach((button) => {
+  button.addEventListener('click', () => chooseScenario(button.dataset.pauseScenario));
+});
 
-document.getElementById('boot')?.remove();
+refreshTelemetry();
+
+addEventListener('keydown', (e) => {
+  if (e.code !== 'Escape' || !game || !game.running || !bootLabel?.hidden) return;
+  e.preventDefault();
+  if (pauseMenu?.hidden) showPauseMenu();
+  else resumeGame();
+});
+
+/* Explicit URLs remain deep-linkable, and the manual flag is reserved for the
+ * capture harness. A clean browser launch gets the picker before any WebGL
+ * allocation begins. */
+if (explicitScenarioFor(location.hash) || isManual) void bootGame();

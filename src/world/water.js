@@ -149,6 +149,7 @@ uniform vec3 uDeep;
 uniform vec3 uShallow;
 uniform vec3 uSkyRefl;
 uniform vec3 uBankRefl;
+uniform vec3 uShimmer;
 uniform vec3 uFoamCol;
 uniform float uWaterDbg;
 varying vec3 vWorldW;
@@ -486,6 +487,13 @@ export class Water {
            * suggestion of collected bubbles, not a kerb. */
           float shore = sstep(0.09, 0.01, gWaterDepth) * sstep(0.62, 0.88, fm.x) * 0.22;
           float foam = clamp(max(carried, shore) * (0.62 + 0.38 * fmFine.y), 0.0, 1.0);
+          /* Fast shallow reaches also break on their crests. Keep this
+           * narrow and speed-gated: it is a riffle crest, not a second white
+           * texture over the whole river. */
+          float riffle = sstep(1.15, 3.0, gWaterSpd);
+          float crestFoam = sstep(0.76, 0.96, gRip) * riffle
+                          * (0.12 + 0.20 * fmFine.y);
+          foam = max(foam, crestFoam);
           // Directly under the fall it is not foam but aerated water, and
           // that has to go nearly opaque or the plunge point is a hole.
           foam = max(foam, sstep(0.80, 0.95, vAgitW));
@@ -567,6 +575,17 @@ export class Water {
           float still = 1.0 - min(1.0, gWaterSpd * 0.42);
           diffuseColor.rgb = mix(diffuseColor.rgb, refl,
                                  fres * 0.72 * (1.0 - foam) * still);
+
+          /* A small bounded glint keeps the pool readable when the canopy
+           * reflection is dark. It is below the foam value: a real ripple
+           * catches a broken highlight, it does not turn the basin into a
+           * mirror. */
+          float crest = sstep(0.70, 0.96, gRip);
+          float glint = crest * (0.24 + 0.76 * fres) * (1.0 - foam)
+                      * (0.32 + 0.68 * min(1.0, gWaterDepth * 0.42));
+          glint *= 0.72 + 0.28 * sin(gAlong * 0.72 - uTime * 0.85
+                                      + gAcross * 0.11);
+          diffuseColor.rgb += uShimmer * glint * 0.16;
 
           // The waterline itself. Feathered over the last few centimetres so
           // the edge wanders with the ripple instead of cutting the bed on a
@@ -710,6 +729,10 @@ export class Water {
         // The far bank, the cliff and the closed forest behind them, which is
         // what a nearly horizontal bounce off this pool actually finds.
         uBankRefl: { value: new THREE.Color(0x151a15) },
+        /* A desaturated skylight tint for moving crest highlights. It is not a
+         * second light: the small additive term is bounded in the shader and
+         * exists only to keep ripples legible in the shaded pool. */
+        uShimmer: { value: new THREE.Color(0x718f84) },
         /* Grey, not white, and this was the last thing wrong with the pool.
          *
          * Foam reads as white because it is the brightest thing in a river,
@@ -971,7 +994,7 @@ export class Water {
   _buildBoil() {
     // Dense enough to carry the churn's relief. Still one draw call, and the
     // triangle count is noise next to the two and a half million in frame.
-    const NR = 30, NA = 96, R = 7.4;
+    const NR = 38, NA = 112, R = 7.4;
     const W = NA + 1, H = NR + 1;
     const P = new Float32Array(W * H * 3);
     const pol = new Float32Array(W * H * 2);
@@ -1012,7 +1035,7 @@ export class Water {
     const m = new THREE.MeshStandardMaterial({
       color: 0xffffff, roughness: 0.4, metalness: 0.0,
       transparent: true, depthWrite: false, side: THREE.DoubleSide,
-      envMapIntensity: 1.0,
+      envMapIntensity: 0.58,
     });
 
     /* The surface, written once and used three times — for the height, for
@@ -1064,7 +1087,7 @@ export class Water {
          * like once it was made opaque. What a boil actually presents is a
          * *broken* surface barely raised above the pool, so the height comes
          * down and most of what is left is the lumps below. */
-        float dome = 0.62 * exp(-r * r / 7.0);
+        float dome = 0.38 * exp(-r * r / 7.0);
         /* Lumps from the noise field rather than from harmonics in the angle,
          * and the reason is spatial frequency near the pole.
          *
@@ -1080,19 +1103,25 @@ export class Water {
          * to zero in the middle of the churn. That collapse is what faceted the
          * first version of this. */
         float ar = a * min(4.0, 0.9 + r * 0.8);
-        float lump = 0.26 * exp(-r * r / 9.0)
+        float lump = 0.14 * exp(-r * r / 9.0)
           * (sin(ar + t * 2.1 + r * 1.3) * sin(r * 1.7 - t * 2.6)
            + 0.6 * sin(ar * 1.6 - t * 1.5) * cos(r * 2.3 - t * 3.1));
+        /* The baked field contributes a broad, non-periodic bias to the
+         * crown. It is intentionally low amplitude: foam coverage supplies
+         * the fine breakup; the vertex field should only stop the ring from
+         * becoming a perfectly repeating set of radial lobes. */
+        lump += 0.075 * exp(-r * r / 10.0) * (n - 0.5)
+              + 0.045 * exp(-r * r / 13.0) * (n2 - 0.5);
         /* Waves radiating out, and the phase has to be r - ct with c
          * positive or the rings travel inward, which reads as a drain. The
          * amplitude decays with radius twice over: once because a circular
          * wave spreads its energy round a growing circumference, and once
          * because it damps. */
-        float ring = 0.26 * amp * exp(-r * 0.26) / sqrt(1.0 + r)
+        float ring = 0.18 * amp * exp(-r * 0.26) / sqrt(1.0 + r)
           * sin((r + wob) * 2.05 - t * 3.4);
-        ring += 0.11 * amp * exp(-r * 0.20) / sqrt(1.0 + r)
+        ring += 0.075 * amp * exp(-r * 0.20) / sqrt(1.0 + r)
           * sin((r - wob * 1.7) * 1.31 - t * 2.15 + a * 0.8);
-        float swell = 0.055 * sin(r * 0.7 - t * 1.35 + a * 1.5);
+        float swell = 0.035 * sin(r * 0.7 - t * 1.35 + a * 1.5);
         /* And all of it goes to nothing before the mesh does. The disc has an
          * outline and the water does not, so anything still moving when the
          * rim arrives draws that outline for you — a raised elliptical table
@@ -1108,7 +1137,7 @@ export class Water {
         // Held below the curtain's own white. The churn is lit by the same
         // skylight and is no brighter than the sheet feeding it; brighter and
         // it separates from the fall and reads as a foreign object.
-        uWhite: { value: new THREE.Color(0xaeb6b1) },
+        uWhite: { value: new THREE.Color(0x9aa6a2) },
         // Less green. The impact of a fall is grey-white water with air in it,
         // and a teal base showing between the bubbles was most of why the
         // footprint read as pond rather than as churn.
@@ -1213,12 +1242,21 @@ export class Water {
            * only once it is outside the churn, and the modulation by the map
            * has to be applied to the rafts and not to the core: multiplying the
            * core by a noise field is what turned it into speckle. */
-          float cov = sstep(5.2, 3.0, r);
+          float cov = sstep(5.2, 3.0, r) * (0.72 + 0.28 * f1.g);
           float ring = exp(-pow((r - 3.6 - 0.55 * sin(uTime * 0.7)
                                  - 0.8 * sin(a * 2.0 + uTime * 0.3)) / 2.1, 2.0));
           float rafts = sstep(7.2, 2.2, r) * (0.25 + 1.5 * f1.g * (0.4 + 1.2 * f2.r));
+          /* The impact leaves a short foam wake in the downstream direction.
+           * It is wider at the crown and narrows as it is carried away, which
+           * joins the local boil to the current instead of leaving an isolated
+           * white disc under the curtain. */
+          float downstream = max(0.0, xz.y);
+          float wake = sstep(0.35, 1.1, downstream)
+                     * exp(-downstream * 0.42)
+                     * exp(-xz.x * xz.x / 4.2)
+                     * (0.30 + 0.70 * f1.g);
           cov = clamp(max(cov, max(ring * (0.62 + 0.42 * f1.r),
-                                   rafts * (0.55 + 0.6 * f1.r))), 0.0, 1.0);
+                                   max(rafts * (0.55 + 0.6 * f1.r), wake))), 0.0, 1.0);
 
           /* Bubbles read as light *between* dark water, so the white goes on
            * top of the deep colour rather than the surface being tinted. */
@@ -1235,7 +1273,7 @@ export class Water {
           // as a hard-edged opaque anything: the shape you see is the shape of
           // the primitive.
           diffuseColor.a = max(diffuseColor.a,
-                               sstep(6.0, 2.4, r) * (0.55 + 0.62 * f1.r));
+                               sstep(6.0, 2.4, r) * (0.34 + 0.44 * f1.r));
           gFoam = cov;
         `)
         .replace('#include <roughnessmap_fragment>', /* glsl */ `
@@ -1268,7 +1306,10 @@ export class Water {
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
-      envMapIntensity: 1.5,
+      /* The curtain is already lit by the explicit aeration/scatter terms
+       * below. A strong environment lobe flattens the whole sheet into a
+       * white panel before those terms can show the packet structure. */
+      envMapIntensity: 0.65,
     });
 
     m.onBeforeCompile = (sh) => {
@@ -1366,7 +1407,12 @@ export class Water {
            * polished wood rather than as water. The lateral tearing is the
            * geometry's job; the texture only has to avoid contradicting it. */
           float shear = vCol * (0.05 + 0.17 * f);
-          vec2 uv = vec2(vAcross * 1.35 + shear, parcel * 0.34);
+          /* A pair of incommensurate bends keeps the filaments from staying
+           * parallel for the whole drop. Geometry supplies the large tear;
+           * this supplies the smaller packet-scale wobble between columns. */
+          float bend = 0.075 * sin(parcel * 5.2 + vAcross * 8.7)
+                     + 0.035 * sin(parcel * 11.1 - vAcross * 17.0 + 1.7);
+          vec2 uv = vec2(vAcross * 1.35 + shear + bend, parcel * 0.34);
           vec4 st = texture2D(tStrands, uv);
           // A second, slower read for the surges travelling down the sheet.
           vec4 sg = texture2D(tStrands, vec2(uv.x * 0.6 + 0.2, parcel * 0.14 + 0.5));
@@ -1446,8 +1492,17 @@ export class Water {
            * centreline and the fringe by the fine map, rather than the whole
            * thing being faded by one scalar. */
           float core = sstep(0.86, 0.30, abs(vAcross));
-          float aBurst = core * (0.80 + 0.20 * sf.b)
-                       + 0.55 * sf.r * (0.30 + 0.70 * rope);
+          /* The lower sheet is turbulent, but it is not a solid rectangular
+           * panel. A packet mask made from the slow surge, fine breakup and a
+           * low-amplitude diagonal wave leaves darker channels through the
+           * core, so the cliff and the water behind it remain visible. */
+          float packet = sstep(0.28, 0.76,
+                         0.50 * sg.g + 0.30 * sf.r
+                         + 0.20 * (0.5 + 0.5 * sin(parcel * 5.1
+                                                   + vAcross * 11.0 + sg.b * 6.2831)));
+          float aBurst = core * (0.34 + 0.52 * packet)
+                       + 0.34 * sf.r * (0.22 + 0.78 * rope);
+          aBurst *= 0.82 + 0.18 * sg.g;
           a = mix(a, clamp(aBurst, 0.0, 1.0), burst);
 
           /* The limbs, which is the term the sheet was missing and the reason
@@ -1492,8 +1547,8 @@ export class Water {
            * third of the way down — whitest at the top, thinning to grey —
            * which is the inversion the critique caught. This one starts at
            * nothing and does not reach full until the bottom. */
-          gAer = clamp(sstep(0.03, 0.72, f) * (0.78 + 0.34 * sg.g)
-                       + 0.14 * strand * torn, 0.0, 1.0);
+          gAer = clamp(sstep(0.03, 0.82, f) * (0.65 + 0.24 * sg.g)
+                       + 0.12 * strand * torn, 0.0, 1.0);
           /* And the value it maps to keeps its structure, which is the other
            * half of the saturation problem.
            *
@@ -1505,7 +1560,7 @@ export class Water {
            * carries most of that variation and the surge map the rest, and the
            * ceiling stays short of the white so there is somewhere for a lit
            * highlight to go without clipping. */
-          float val = gAer * (0.34 + 0.50 * rope + 0.22 * sg.g);
+          float val = gAer * (0.26 + 0.42 * rope + 0.18 * sg.g + 0.12 * packet);
           // The limbs are thinner water and therefore darker as well as more
           // transparent; without this they are pale and the sheet keeps its
           // hard edge in value even after it has lost it in alpha.
@@ -1546,7 +1601,7 @@ export class Water {
              * it, which is most of the day here — and it was doing so
              * uniformly, so it erased the structure the diffuse had. */
             totalEmissiveRadiance += directionalLights[0].color
-              * pow(fwd, 5.0) * gAer * (0.10 + 0.30 * gRope) * diffuseColor.a;
+              * pow(fwd, 5.0) * gAer * (0.08 + 0.22 * gRope) * diffuseColor.a;
           #endif
           /* And a floor under it that owes nothing to the sun.
            *
@@ -2071,7 +2126,7 @@ export class Water {
       this.spray = null;
     }
     this._buildSpray();
-    if (this.spray) this.spray.renderOrder = 13;
+    if (this.spray) this.spray.renderOrder = 14;
   }
 
   update(dt, camera, sunDir, sunColor, hemiColor, sunIntensity = 1) {
@@ -2109,9 +2164,26 @@ export class Water {
   }
 
   dispose() {
-    for (const t of Object.values(this.tex)) t.dispose?.();
-    this.surfaceMat.dispose();
-    this.curtainMat.dispose();
-    this.spray?.material.dispose();
+    if (this._disposed) return;
+    const disposeTexture = (t) => {
+      if (!t) return;
+      if (t.userData?.rt) t.userData.rt.dispose();
+      else t.dispose?.();
+    };
+    for (const t of Object.values(this.tex)) disposeTexture(t);
+
+    const geometries = new Set();
+    const materials = new Set(this.materials || []);
+    this.root.traverse((o) => {
+      if (o.geometry) geometries.add(o.geometry);
+      if (o.material) {
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) materials.add(m);
+      }
+    });
+    for (const g of geometries) g.dispose();
+    for (const m of materials) m?.dispose?.();
+
+    this.root.remove(...this.root.children);
+    this._disposed = true;
   }
 }

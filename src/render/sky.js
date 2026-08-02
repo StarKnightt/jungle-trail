@@ -204,6 +204,17 @@ export class Sky {
   get sunDir() { return this.uniforms.uSunDir.value; }
 
   /**
+   * Tune the low dome colours with the scene fog. Keeping these as scenario
+   * inputs prevents a biome from changing its distance fog while retaining a
+   * green horizon baked into the sky and environment map.
+   */
+  setAtmosphere({ skyGround = 0x4d5a41, skyHaze = 0x475538 } = {}) {
+    this.uniforms.uGroundColor.value.set(skyGround);
+    this.uniforms.uHazeColor.value.set(skyHaze);
+    return this;
+  }
+
+  /**
    * Set the sun by elevation/azimuth in degrees.
    * Elevation around 32-42 is the useful window: high enough that shafts reach
    * the floor through the canopy, low enough that they are still shafts.

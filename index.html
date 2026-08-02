@@ -7,14 +7,145 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05070a; }
-  /* The canvas is the entire experience — no HUD, no overlay, nothing that
-     would remind you it is a program. */
+  /* The canvas is the gameplay surface; menus are explicit overlays above it. */
   #view { display: block; width: 100vw; height: 100vh; }
+  #telemetry {
+    position: fixed; top: 16px; left: 16px; z-index: 5;
+    width: min(224px, calc(100vw - 32px)); padding: 11px 12px 10px;
+    box-sizing: border-box; border: 1px solid rgba(202, 221, 193, .18);
+    border-radius: 4px; color: #e9eee5; background: rgba(7, 13, 9, .72);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, .20); backdrop-filter: blur(5px);
+    font: 400 11px/1.35 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .08em; pointer-events: none;
+  }
+  #telemetry[hidden] { display: none; }
+  .telemetry-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .telemetry-metric { display: grid; gap: 2px; min-width: 0; }
+  .telemetry-metric span { color: #8f9f89; font-size: 9px; letter-spacing: .14em; }
+  .telemetry-metric strong { color: #e9eee5; font-size: 14px; font-weight: 500; letter-spacing: .02em; }
+  .telemetry-divider { height: 1px; margin: 10px 0 9px; background: rgba(202, 221, 193, .14); }
+  .teleport-heading { display: flex; justify-content: space-between; gap: 8px; color: #a2b596; font-size: 9px; letter-spacing: .16em; text-transform: uppercase; }
+  .teleport-heading span:last-child { color: #71806c; letter-spacing: .08em; text-transform: none; }
+  .teleport-list { display: grid; gap: 4px; margin-top: 7px; }
+  .teleport-button {
+    display: grid; grid-template-columns: 21px minmax(0, 1fr); align-items: center;
+    gap: 7px; width: 100%; min-height: 26px; padding: 3px 5px;
+    border: 1px solid transparent; border-radius: 3px; color: #cbd5c5;
+    background: transparent; cursor: pointer; text-align: left;
+    font: inherit; letter-spacing: .02em; pointer-events: auto;
+    transition: border-color .16s, background .16s, color .16s;
+  }
+  .teleport-button:hover, .teleport-button:focus-visible {
+    border-color: rgba(185, 210, 158, .50); color: #f0f4ec;
+    background: rgba(62, 91, 61, .42); outline: none;
+  }
+  .teleport-button kbd {
+    display: grid; place-items: center; width: 20px; height: 20px;
+    box-sizing: border-box; border: 1px solid rgba(202, 221, 193, .30);
+    border-radius: 3px; color: #d8e4d1; background: rgba(185, 210, 158, .13);
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .telemetry-footnote { margin-top: 8px; color: #71806c; font-size: 8px; letter-spacing: .08em; }
   #boot {
-    position: fixed; inset: 0; display: grid; place-items: center;
+    position: fixed; inset: 0; z-index: 20; display: grid; place-items: center;
     font: 300 13px/1.7 ui-sans-serif, system-ui, sans-serif;
     letter-spacing: .22em; text-transform: uppercase; color: #6d7a63;
     background: #05070a; pointer-events: none;
+  }
+  #boot[hidden] { display: none; }
+  .boot-panel { width: min(420px, calc(100vw - 48px)); text-align: center; }
+  .boot-title { color: #e8eee2; font: 300 38px/.95 Georgia, serif; letter-spacing: -.025em; text-transform: none; }
+  #boot-status { min-height: 22px; margin-top: 22px; color: #a2b596; font-size: 11px; }
+  .boot-track { height: 3px; margin-top: 12px; overflow: hidden; background: rgba(176, 199, 162, .18); }
+  #boot-fill { display: block; width: 0%; height: 100%; background: #b9d29e; transition: width .2s ease-out; }
+  #boot-percent { margin-top: 10px; color: #6d7a63; font-size: 11px; letter-spacing: .18em; }
+  #scenario-menu {
+    position: fixed; inset: 0; z-index: 10; display: flex; align-items: center;
+    justify-content: center; overflow: auto;
+    padding: 24px; box-sizing: border-box; color: #e9eee5;
+    background:
+      radial-gradient(circle at 50% 42%, rgba(91, 115, 76, .20), transparent 36%),
+      linear-gradient(145deg, #0b120e 0%, #111b15 52%, #080d0b 100%);
+    font: 400 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+  }
+  #scenario-menu[hidden] { display: none; }
+  .scenario-panel { width: min(720px, 100%); text-align: center; }
+  .scenario-kicker {
+    margin: 0 0 14px; color: #a2b596; font-size: 11px; font-weight: 600;
+    letter-spacing: .28em; text-transform: uppercase;
+  }
+  .scenario-title {
+    margin: 0; color: #f3f5ee; font: 300 clamp(42px, 8vw, 76px)/.95 Georgia, serif;
+    letter-spacing: -.035em;
+  }
+  .scenario-copy { margin: 22px auto 32px; max-width: 430px; color: #b8c2b3; }
+  .scenario-options {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  }
+  .scenario-choice {
+    min-height: 132px; padding: 22px 18px; border: 1px solid rgba(202, 221, 193, .26);
+    border-radius: 3px; color: #eef3e9; background: rgba(13, 23, 17, .62);
+    cursor: pointer; text-align: left; transition: border-color .18s, background .18s,
+      transform .18s; font: inherit;
+  }
+  .scenario-choice:hover, .scenario-choice:focus-visible {
+    border-color: #b9d29e; background: rgba(62, 91, 61, .55); outline: none;
+    transform: translateY(-2px);
+  }
+  .scenario-choice strong { display: block; margin-bottom: 8px; font: 400 26px/1 Georgia, serif; }
+  .scenario-choice span { display: block; color: #aebbaa; font-size: 13px; }
+  @media (max-width: 520px) {
+    .scenario-options { grid-template-columns: 1fr; }
+    .scenario-choice { min-height: 0; }
+  }
+  @media (max-height: 600px) {
+    #scenario-menu { align-items: flex-start; }
+    .scenario-panel { margin: 24px 0; }
+  }
+  #pause-menu {
+    position: fixed; inset: 0; z-index: 30; display: grid; place-items: center;
+    overflow: auto; padding: 24px; box-sizing: border-box; color: #e9eee5;
+    background: rgba(4, 7, 5, .74); backdrop-filter: blur(7px);
+    font: 400 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+  }
+  #pause-menu[hidden] { display: none; }
+  .pause-panel {
+    width: min(520px, 100%); padding: 36px; box-sizing: border-box;
+    border: 1px solid rgba(202, 221, 193, .24); border-radius: 4px;
+    background: rgba(12, 21, 15, .94); box-shadow: 0 24px 80px rgba(0, 0, 0, .38);
+    text-align: center;
+  }
+  .pause-kicker {
+    margin: 0 0 12px; color: #a2b596; font-size: 11px; font-weight: 600;
+    letter-spacing: .28em; text-transform: uppercase;
+  }
+  .pause-title {
+    margin: 0; color: #f3f5ee; font: 300 clamp(38px, 7vw, 58px)/.95 Georgia, serif;
+    letter-spacing: -.035em;
+  }
+  .pause-copy { margin: 18px auto 26px; max-width: 390px; color: #b8c2b3; }
+  .pause-actions { display: grid; gap: 10px; }
+  .pause-button {
+    min-height: 48px; padding: 12px 16px; border: 1px solid rgba(202, 221, 193, .26);
+    border-radius: 3px; color: #eef3e9; background: rgba(28, 48, 31, .72);
+    cursor: pointer; font: inherit; transition: border-color .18s, background .18s;
+  }
+  .pause-button:hover, .pause-button:focus-visible {
+    border-color: #b9d29e; background: rgba(62, 91, 61, .72); outline: none;
+  }
+  .pause-button.primary { color: #142016; background: #b9d29e; border-color: #b9d29e; }
+  .pause-button.primary:hover, .pause-button.primary:focus-visible { background: #d0e5ba; }
+  .pause-scenario-label {
+    margin: 12px 0 0; color: #8f9f89; font-size: 11px;
+    letter-spacing: .18em; text-transform: uppercase;
+  }
+  .pause-scenarios { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pause-button.danger { margin-top: 8px; color: #d8b9aa; background: rgba(74, 35, 28, .36); }
+  .pause-button.danger:hover, .pause-button.danger:focus-visible {
+    border-color: #d8a998; background: rgba(96, 46, 36, .58);
+  }
+  @media (max-width: 520px) {
+    .pause-panel { padding: 28px 20px; }
   }
 </style>
 <script type="importmap">
@@ -28,7 +159,64 @@
 </head>
 <body>
 <canvas id="view"></canvas>
-<div id="boot">jungle trail</div>
+<aside id="telemetry" hidden aria-label="Performance and teleport controls">
+  <div class="telemetry-metrics">
+    <div class="telemetry-metric"><span>FPS</span><strong id="fps-value">—</strong></div>
+    <div class="telemetry-metric"><span>CPU</span><strong id="cpu-value">—</strong></div>
+    <div class="telemetry-metric"><span>GPU</span><strong id="gpu-value">—</strong></div>
+  </div>
+  <div class="telemetry-divider"></div>
+  <div class="teleport-heading"><span>Teleport</span><span>Press a key</span></div>
+  <div class="teleport-list">
+    <button class="teleport-button" type="button" data-teleport="1"><kbd>1</kbd><span>Trailhead</span></button>
+    <button class="teleport-button" type="button" data-teleport="2"><kbd>2</kbd><span>Mid trail</span></button>
+    <button class="teleport-button" type="button" data-teleport="3"><kbd>3</kbd><span>Ruins approach</span></button>
+    <button class="teleport-button" type="button" data-teleport="4"><kbd>4</kbd><span>Temple clearing</span></button>
+    <button class="teleport-button" type="button" data-teleport="5"><kbd>5</kbd><span>The falls</span></button>
+  </div>
+  <div class="telemetry-footnote">CPU/GPU = frame load</div>
+</aside>
+<div id="boot" hidden role="status" aria-live="polite" aria-busy="true">
+  <div class="boot-panel">
+    <div class="boot-title">Jungle Trail</div>
+    <div id="boot-status">Preparing your trail…</div>
+    <div class="boot-track" aria-hidden="true"><span id="boot-fill"></span></div>
+    <div id="boot-percent">0%</div>
+  </div>
+</div>
+<main id="scenario-menu" aria-labelledby="scenario-title">
+  <section class="scenario-panel">
+    <p class="scenario-kicker">Choose your trail</p>
+    <h1 class="scenario-title" id="scenario-title">Jungle Trail</h1>
+    <p class="scenario-copy">Select a world to explore. Each trail has its own atmosphere, vegetation and soundscape.</p>
+    <div class="scenario-options">
+      <button class="scenario-choice" type="button" data-scenario="jungle">
+        <strong>Jungle</strong>
+        <span>Humid green canopy, tropical undergrowth and the original trail.</span>
+      </button>
+      <button class="scenario-choice" type="button" data-scenario="forest">
+        <strong>Forest</strong>
+        <span>Autumn leaves, temperate ground and a cooler woodland atmosphere.</span>
+      </button>
+    </div>
+  </section>
+</main>
+<aside id="pause-menu" hidden role="dialog" aria-labelledby="pause-title" aria-modal="true">
+  <section class="pause-panel">
+    <p class="pause-kicker">Scenario paused</p>
+    <h2 class="pause-title" id="pause-title">Pause</h2>
+    <p class="pause-copy">The trail is paused. Resume your walk or choose another way to continue.</p>
+    <div class="pause-actions">
+      <button class="pause-button primary" id="pause-resume" type="button">Resume</button>
+      <p class="pause-scenario-label">Change scenario</p>
+      <div class="pause-scenarios">
+        <button class="pause-button" type="button" data-pause-scenario="jungle">Jungle</button>
+        <button class="pause-button" type="button" data-pause-scenario="forest">Forest</button>
+      </div>
+      <button class="pause-button danger" id="pause-exit" type="button">Exit to start menu</button>
+    </div>
+  </section>
+</aside>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

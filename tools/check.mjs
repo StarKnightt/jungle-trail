@@ -45,7 +45,7 @@ export function check() {
  * printed nothing and exited zero — a checker that always passes is worse than
  * no checker, and it stayed unnoticed because the harness calls check()
  * itself. */
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const bad = check();
   if (bad.length) { console.error('✗ parse errors:\n' + bad.join('\n')); process.exit(1); }
   console.log('✓ all sources parse');

@@ -6,7 +6,8 @@
   "description": "First-person jungle trail. Procedural everything, zero external assets.",
   "scripts": {
     "serve": "node tools/serve.mjs",
-    "shoot": "node tools/shoot.mjs"
+    "shoot": "node tools/shoot.mjs",
+    "test": "node --test"
   },
   "devDependencies": {
     "playwright": "^1.62.0"

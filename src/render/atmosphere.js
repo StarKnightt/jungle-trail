@@ -835,6 +835,11 @@ export class Atmosphere {
    * canopy the atmosphere owns — and inverting that would mean the water
    * could not be lit like everything else.
    */
+  setMistAmbient(color = 0x11170f) {
+    this.volumeMat.uniforms.uMistAmbient.value.set(color);
+    return this;
+  }
+
   setFallsPlume(impact, radius = 12.0) {
     this.volumeMat.uniforms.uPlume.value.set(impact.x, impact.y, impact.z, radius);
   }

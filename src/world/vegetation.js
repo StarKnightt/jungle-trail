@@ -30,7 +30,7 @@
  */
 import * as THREE from 'three';
 import { bakeImage, bakeSurface } from '../gfx/bake.js';
-import { LEAF_FRAG, BARK } from './plantTex.js';
+import { leafFrag, BARK } from './plantTex.js';
 import { makeRng, fern, broadleaf, palm, sprig, tussock, vine, tree, canopyPatch, thicket, sapling, log, deadVine, litterMat, rootRun } from './plants.js';
 import { BOUNDS } from './terrain.js';
 import { standingWater } from './spillway.js';
@@ -558,7 +558,7 @@ export class Vegetation {
    *   density every real ruin has along them.
    * @param {import('../player/collision.js').CollisionWorld} [collision]
    */
-  constructor(renderer, terrain, trail, seed = 7717, ruins = null, collision = null) {
+  constructor(renderer, terrain, trail, seed = 7717, ruins = null, collision = null, opts = {}) {
     this.renderer = renderer;
     this.terrain = terrain;
     this.trail = trail;
@@ -568,6 +568,24 @@ export class Vegetation {
     this.root.name = 'vegetation';
     this.time = 0;
     this.cells = [];
+
+    /* Scenario knobs. `palette` picks which leaf atlas bakes; `tuning` carries
+     * the species weights, per-instance tint and bark tint. Defaults reproduce
+     * the original jungle exactly. */
+    const tuning = opts?.tuning && typeof opts.tuning === 'object' ? opts.tuning : {};
+    const defaults = {
+      palmScale: 1, broadleafScale: 1, conifer: false,
+      tint: { rMul: 0.90, rSway: 0.16, bMul: 0.84, bSway: 0.20 },
+      senescent: { yellow: 0.93, olive: 0.84 },
+      woodTint: 0xffffff,
+    };
+    this.palette = typeof opts?.palette === 'string' ? opts.palette : 'jungle';
+    this.tuning = {
+      ...defaults,
+      ...tuning,
+      tint: { ...defaults.tint, ...(tuning.tint || {}) },
+      senescent: { ...defaults.senescent, ...(tuning.senescent || {}) },
+    };
 
     this.uniforms = {
       uTime: { value: 0 },
@@ -607,7 +625,7 @@ export class Vegetation {
     };
     const shot = (ch, colorSpace, coverageMips = 0) => {
       uniforms.uChannel.value = ch;
-      return bakeImage(renderer, LEAF_FRAG, { size, uniforms, colorSpace, coverageMips });
+      return bakeImage(renderer, leafFrag(this.palette), { size, uniforms, colorSpace, coverageMips });
     };
     /* Only the albedo gets a hand-built mip chain, because only its alpha is
      * ever tested. The other two are sampled, not thresholded, so the GPU's
@@ -673,6 +691,9 @@ export class Vegetation {
     this.leafMat = patchWind(leaf, this.uniforms, { transmission: true });
 
     const wood = new THREE.MeshStandardMaterial({
+      // A bark tint per biome: tropical bark is pale on purpose, and temperate
+      // bark reads wrong at that value, so the forest coats it darker.
+      color: this.tuning.woodTint,
       map: this.barkTex.map,
       normalMap: this.barkTex.normalMap,
       roughnessMap: this.barkTex.ormMap,
@@ -1028,7 +1049,8 @@ export class Vegetation {
       if (c.stone) return 0;
       if (!bank(c, 2.0, 62)) return 0;
       if (c.slope > 0.75) return 0;
-      return 0.42 * edgeLight(c.dist) * wallFoot(c, 0.35) * rooting(c, 0.92, 0.72);
+      return 0.42 * edgeLight(c.dist) * wallFoot(c, 0.35) * rooting(c, 0.92, 0.72)
+           * this.tuning.palmScale;
     }, (c) => {
       // Palms come up in cohorts under a parent, so a clump centre is where
       // the tall ones are and the rim is all suckers.
@@ -1044,7 +1066,8 @@ export class Vegetation {
       if (!bank(c, 1.0, 48)) return 0;
       if (c.slope > 0.85) return 0;
       return 0.62 * edgeLight(c.dist) * (0.7 + 0.5 * c.wet)
-           * wallFoot(c, 0.55) * (c.stone ? 0.28 : 1) * rooting(c, 0.85, 0.58);
+           * wallFoot(c, 0.55) * (c.stone ? 0.28 : 1) * rooting(c, 0.85, 0.58)
+           * this.tuning.broadleafScale;
     }, (c) => {
       const s = 0.58 + c.rng() * 0.72 + c.dens * 0.40;
       return {
@@ -1445,14 +1468,18 @@ export class Vegetation {
        * changed hue as it crossed the switch radius would turn an invisible
        * change of resolution into an obvious one. */
       const cols = [];
+      const T = this.tuning.tint;
+      const S = this.tuning.senescent;
       for (let i = 0; i < b.items.length; i++) {
         const v = (0.60 + rng() * 0.46) * shade;
         /* Held closer to neutral than it was. The chroma spread here is
          * multiplied by an already yellow-green atlas, so its warm end was
          * landing on screen as cream — which is what put the pale, almost
-         * unrelated-looking leaves through the middle of the frame. */
+         * unrelated-looking leaves through the middle of the frame. The
+         * scenario tuning nudges the tint warm (forest) or leaves it as-is
+         * (jungle). */
         const col = new THREE.Color(
-          v * (0.90 + rng() * 0.16), v, v * (0.84 + rng() * 0.20));
+          v * (T.rMul + rng() * T.rSway), v, v * (T.bMul + rng() * T.bSway));
         /* Roughly one plant in nine is dying, and it is the most valuable
          * one in the frame. Uniform health is a strong CG tell: a real
          * understory always has senescing fronds going yellow and dead ones
@@ -1462,8 +1489,8 @@ export class Vegetation {
          * plants read as separate objects painted a different colour rather
          * than as the same species in worse condition. */
         const age = rng();
-        if (age > 0.93) col.lerp(new THREE.Color(0.58, 0.47, 0.28), 0.22 + rng() * 0.22);
-        else if (age > 0.84) col.lerp(new THREE.Color(0.60, 0.57, 0.38), 0.14 + rng() * 0.14);
+        if (age > S.yellow) col.lerp(new THREE.Color(0.58, 0.47, 0.28), 0.22 + rng() * 0.22);
+        else if (age > S.olive) col.lerp(new THREE.Color(0.60, 0.57, 0.38), 0.14 + rng() * 0.14);
         cols.push(col);
       }
 
@@ -1614,6 +1641,40 @@ export class Vegetation {
       }
     }
     return { meshes: this.cells.length, instances: n, tris: Math.round(tris) };
+  }
+
+  dispose() {
+    if (this._disposed) return;
+
+    const geometries = new Set();
+    this.root.traverse((o) => { if (o.geometry) geometries.add(o.geometry); });
+    for (const variants of Object.values(this.species || {})) {
+      for (const variant of variants) {
+        for (const lod of [variant.hi, variant.lo]) {
+          if (lod?.leaf) geometries.add(lod.leaf);
+          if (lod?.wood) geometries.add(lod.wood);
+        }
+      }
+    }
+    for (const g of geometries) g.dispose();
+
+    for (const m of [this.leafMat, this.woodMat, this.leafDepth, this.woodDepth]) {
+      m?.dispose();
+    }
+    const disposeTexture = (t) => {
+      if (!t) return;
+      if (t.userData?.rt) t.userData.rt.dispose();
+      else t.dispose?.();
+    };
+    disposeTexture(this.leafMap);
+    disposeTexture(this.leafNrm);
+    disposeTexture(this.leafAux);
+    this.barkTex?.dispose?.();
+
+    this.root.remove(...this.root.children);
+    this.cells.length = 0;
+    this.species = null;
+    this._disposed = true;
   }
 }
 
