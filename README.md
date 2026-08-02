@@ -66,9 +66,24 @@ clearing, 5 the falls.
 
 ## Performance
 
-6.3 - 6.8 ms per frame on an RTX 4060 at 1600x900 — 147 fps in the corridor at
-495 scene draw calls, 157 fps facing the falls at 234. The game caps itself at
+8.9 - 9.3 ms per frame on an RTX 4060 at 1600x900 — 108 fps in the corridor at
+495 scene draw calls, 113 fps facing the falls at 234. The game caps itself at
 60 fps; there is no reason for a walking-pace scene to render at 300.
+
+Those numbers are higher than the ones this file used to quote, and the frame
+did not get slower. `glFinish` in a page does not wait for the GPU: Chromium
+runs WebGL over a command buffer into a separate process, and finish returns
+once the queue has been handed over. The tools now synchronise on a one-pixel
+`readPixels`, which cannot return before the frame exists. Under the old timer
+the post-processing chain appeared to cost forty microseconds and `ultra`
+rendered faster than `medium`.
+
+Of that frame, the whole post stack — volumetrics, occlusion, grade, bloom,
+defocus and shutter — is 1.9 to 2.0 ms at `high`. The grading system added 0.19
+ms of it standing still and 0.28 ms while the camera moves: bloom 0.13, defocus
+0.07, shutter 0.11 when there is motion to integrate, and the grade, the
+vignette, the aberration and the grain together under 0.03, because they are
+arithmetic inside a pass that has to run anyway.
 
 The pool's planar reflection is the one pass that is not free: it is a second
 submission of the whole clearing and it costs about 1.4 ms of a falls-facing
@@ -99,6 +114,23 @@ to resolve a hundred thousand leaf cards in a depth buffer.
 
 **Volumetrics.** A half-resolution dithered raymarch for the light shafts.
 
+**Post-processing.** The scene is never tone mapped more than once, and the tone
+map is the last thing that happens rather than the first. Everything that adds
+or moves light — in-scattered mist, lens glare, defocus, the shutter — happens
+in linear HDR before the curve, because all of it is radiance. The grade sits on
+both sides of the curve: channel crosstalk and an ASC slope/offset/power on the
+linear side, where a film stock's response lives, and the toe, the midtone
+contrast and the split tone after the transfer function, where a print's
+densities live. Putting the print half in linear is a mistake worth naming: a
+toe lift of 0.014 becomes thirty-two code values there.
+
+The circle of confusion is the thin-lens formula for a 35 mm lens at f/2.8
+focused at 5.5 m, with the sensor size derived from the render's own field of
+view so the two agree. Motion blur has no velocity buffer behind it; it
+reconstructs screen velocity from the depth buffer and the previous frame's
+view-projection, which is exact for everything in this world that is not
+growing.
+
 **Audio.** The DSP is pure functions: `Float32Array` in, `Float32Array` out, with
 no Web Audio anywhere in the synthesis path. Only `src/audio/engine.js` touches
 the Web Audio API. That separation is what lets the exact same code render the
@@ -114,7 +146,8 @@ common period and never audibly repeats.
 
 Honest version: this is not finished.
 
-- **In:** terrain, vegetation, lighting, ruins, character, audio and water.
+- **In:** terrain, vegetation, lighting, ruins, character, audio, water and
+  post-processing.
 - **Closed at 6/10 after four critic passes:** water. A blind critic scored it
   3, then 4, then 5, then 6 out of 10 and closed it there. It ruled the falling
   curtain itself closed after the third pass — the remaining gap there is satin
@@ -127,7 +160,9 @@ Honest version: this is not finished.
   the system. What the critic left on the table for a future pass: the brook's
   banks are still straight, the reflection is soft, the masonry bands do not
   quite line up between blocks, and the lip crest wants notching.
-- **Not done:** post-processing. No colour grading, no depth of field.
+- **Built but not yet reviewed:** post-processing. Grade, bloom, depth of field,
+  camera motion blur, grain, chromatic aberration and vignette are all in and
+  measured, and no critic has seen them yet.
 
 The vegetation and lighting critics signed off at 5/10 and 6/10 respectively, and
 they signed off on diminishing returns rather than on perfection.
