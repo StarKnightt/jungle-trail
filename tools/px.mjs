@@ -8,6 +8,14 @@
  *
  *   node tools/px.mjs shots/s2r10/18.png --crop 740,0,290,420 --zoom 2
  *   node tools/px.mjs shots/s2r10/18.png --crop 740,0,290,420 --stats
+ *   node tools/px.mjs a.png --diff b.png
+ *
+ * The --diff mode is the one that keeps an evidence pair honest. Two captures
+ * that were meant to differ only by one shader term will in fact differ by
+ * everything the simulation did between them, and the difference between "this
+ * is what bloom does" and "this is what two seconds of falling water does" is
+ * not visible by eye in a pair of thumbnails — it is a range of a hundred and
+ * forty code values in the delta, which this prints.
  *
  * There is no image library in this project and there is not going to be one,
  * so the PNG codec is here. It only has to handle what Chromium's toDataURL
@@ -107,6 +115,41 @@ export function writePng(file, w, h, d) {
   ]));
 }
 
+/* What actually changed between two frames.
+ *
+ * Reported as a signed distribution rather than a mean absolute error, because
+ * the two failure modes look nothing alike. An effect that was added to the
+ * whole frame has a delta with a non-zero mean and a small spread; a pair that
+ * drifted out of sync has a delta with a mean near zero and a spread of tens of
+ * code values, because half the moving detail went one way and half the other.
+ * The percentage past a threshold is the one number that separates them.
+ */
+function diff(a, b, [cx, cy, cw, ch], an, bn) {
+  if (a.w !== b.w || a.h !== b.h) throw new Error('size mismatch');
+  const d = [];
+  let dr = 0, dg = 0, db = 0, n = 0;
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = ((cy + y) * a.w + cx + x) * 4;
+      dr += a.d[i] - b.d[i];
+      dg += a.d[i + 1] - b.d[i + 1];
+      db += a.d[i + 2] - b.d[i + 2];
+      n++;
+      d.push(0.2126 * (a.d[i] - b.d[i]) + 0.7152 * (a.d[i + 1] - b.d[i + 1])
+           + 0.0722 * (a.d[i + 2] - b.d[i + 2]));
+    }
+  }
+  const abs = d.map(Math.abs).sort((p, q) => p - q);
+  const pc = (t) => (100 * abs.filter(v => v > t).length / n).toFixed(2);
+  const s = [...d].sort((p, q) => p - q);
+  console.log(`  diff vs ${bn}`);
+  console.log(`    dLuma mean=${(d.reduce((p, q) => p + q, 0) / n).toFixed(2)}` +
+              `  p01=${s[(0.01 * n) | 0].toFixed(1)}  p50=${s[(0.5 * n) | 0].toFixed(1)}` +
+              `  p99=${s[(0.99 * n) | 0].toFixed(1)}  range=${s[0].toFixed(0)}..${s[n - 1].toFixed(0)}`);
+  console.log(`    |dLuma| >1=${pc(1)}%  >4=${pc(4)}%  >8=${pc(8)}%  >16=${pc(16)}%`);
+  console.log(`    dRGB=${(dr / n).toFixed(2)},${(dg / n).toFixed(2)},${(db / n).toFixed(2)}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const src = args[0];
@@ -139,9 +182,16 @@ function main() {
   console.log(`${src} crop ${cx},${cy} ${cw}x${ch}`);
   console.log(`  luma p01=${q(0.01)} p10=${q(0.10)} p50=${q(0.50)} p90=${q(0.90)} p99=${q(0.99)}`);
   console.log(`  spread p90-p10=${q(0.90) - q(0.10)}  p99-p01=${q(0.99) - q(0.01)}`);
+  /* r-b is the warm/cool axis and the one the palette is judged on; g-r is the
+   * foliage axis. They are not the same question and a grade can move one
+   * without the other: a warm print that has quietly collapsed g-r is exactly
+   * how a jungle turns khaki, which is a thing that happened here. */
   console.log(`  mean rgb=${mr.toFixed(1)},${mg.toFixed(1)},${mb.toFixed(1)}` +
               `  sat=${((mx - mn) / Math.max(1, mx) * 100).toFixed(1)}%` +
-              `  warm(r-b)=${(mr - mb).toFixed(1)}`);
+              `  warm(r-b)=${(mr - mb).toFixed(1)}  leaf(g-r)=${(mg - mr).toFixed(1)}`);
+
+  const other = flag('diff', null);
+  if (other) { diff(img, readPng(other), [cx, cy, cw, ch], src, other); return; }
 
   if (!args.includes('--stats')) {
     const zw = cw * zoom, zh = ch * zoom;

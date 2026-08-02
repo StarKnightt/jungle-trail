@@ -45,20 +45,29 @@ import { FS_VERT, DEPTH_GLSL, SSTEP } from '../gfx/glsl.js';
  * that is what the tiers move.
  *
  * `bloom` is a mip count, `dof` a tap count and `motion` a tap count; zero
- * means the pass is not run at all rather than run at strength zero. Bloom
- * survives longest going down the tiers because it is the cheapest of the
- * three — the chain works on a pyramid whose total area is a third of one
- * full-resolution buffer — and because it is the one the falls need.
+ * means the pass is not run at all rather than run at strength zero.
+ *
+ * Every tier gets every effect, and the first version of this table did not:
+ * defocus and the shutter were high and ultra only, on the reasoning that a
+ * machine that has fallen to `low` needs the milliseconds more than it needs
+ * the optics. Measured, that reasoning was wrong twice. The cost is 0.05 ms at
+ * six taps, which is a third of a per cent of a frame on hardware slow enough
+ * to be down here; and the thing being economised on is not a garnish, it is
+ * the difference between a lens and a pinhole. Half the quality ladder was
+ * shipping a look that had never been reviewed, which is the more expensive
+ * outcome by a wide margin. The tiers scale the *sampling* of each effect
+ * rather than its presence, so what changes going down is how much noise is in
+ * the answer, not whether the answer is there.
  */
 const TIER_GRADE = {
-  low: { bloom: 0, dof: 0, motion: 0 },
-  medium: { bloom: 4, dof: 0, motion: 0 },
-  high: { bloom: 5, dof: 12, motion: 7 },
-  ultra: { bloom: 6, dof: 16, motion: 11 },
+  low: { bloom: 4, dof: 6, motion: 8 },
+  medium: { bloom: 5, dof: 8, motion: 12 },
+  high: { bloom: 6, dof: 12, motion: 20 },
+  ultra: { bloom: 7, dof: 16, motion: 28 },
 };
 
 const MAX_DOF = 16;
-const MAX_MOTION = 12;
+const MAX_MOTION = 28;
 
 /* The grade itself, as data.
  *
@@ -147,12 +156,14 @@ const vec2 SPIRAL[${MAX_DOF}] = vec2[${MAX_DOF}](
 const MOTION_FRAG = /* glsl */ `
 precision highp float;
 varying vec2 vUv;
-` + DEPTH_GLSL + /* glsl */ `
+` + DEPTH_GLSL + SSTEP + /* glsl */ `
 uniform sampler2D tScene;
 uniform mat4 uInvViewProj;
 uniform mat4 uPrevViewProj;
-uniform vec3 uMotion;      // shutter fraction, ignore below, clamp at (both uv)
+uniform vec3 uMotion;      // shutter fraction, ignore below and clamp at, pixels
+uniform vec3 uPar;         // parallax pixels per dioptre, frame width, frame height
 uniform int uTaps;
+uniform float uDebug;
 
 void main(){
   float d0 = rawDepth(vUv);
@@ -168,44 +179,124 @@ void main(){
   if (pp.w <= 0.0){ gl_FragColor = vec4(centre, 1.0); return; }
   vec2 prevUv = (pp.xy / pp.w) * 0.5 + 0.5;
 
+  /* The sky needs no special case, which is worth saying because it looks like
+   * it should. It has no geometry and no depth of its own, so the buffer holds
+   * the clear value there and the reconstruction above places it on the far
+   * plane — nine hundred metres out. Under rotation that is exactly right,
+   * because rotation moves everything on the sensor alike whatever its
+   * distance. Under translation the answer is wrong by the parallax of a point
+   * at nine hundred metres against one at infinity, which for a walking pace is
+   * five thousandths of a pixel. The sky was in fact the sharpest thing in a
+   * fast pan, and the cause was not this; it was the weighting below.
+   */
   vec2 vel = (vUv - prevUv) * uMotion.x;
-  float speed = length(vel);
-  /* Under about half a pixel there is nothing to integrate and every tap
-   * would land in the same texel, which costs the fetches and returns the
-   * original. This is also what makes a paused capture identical to an
-   * unblurred one: the harness renders a still frame, the camera has not
-   * moved, and the pass is a copy. */
+  /* Measured in pixels from here on, not in uv. A displacement in uv is not a
+   * distance — the frame is sixteen by nine, so the same uv length is 1.78
+   * times as many pixels across as it is down — and every decision below is
+   * about pixels: how far apart the taps are, when there is nothing left to
+   * integrate, when the velocity has stopped being believable. The first
+   * version of this pass compared uv lengths against a uv threshold and
+   * therefore sampled a vertical pan at nearly half the density of a
+   * horizontal one. */
+  float speed = length(vel * uPar.yz);
+  /* Under about half a pixel there is nothing to integrate and every tap would
+   * land in the same texel, which costs the fetches and returns the original.
+   * This is also what makes a paused capture identical to an unblurred one: the
+   * harness renders a still frame, the camera has not moved, and the pass is a
+   * copy. */
   if (speed < uMotion.y){ gl_FragColor = vec4(centre, 1.0); return; }
-  /* Clamped, because a teleport between stops is a camera velocity of about
-   * four hundred metres per frame and the honest answer to "what did the
-   * sensor see during that" is not a streak across the whole frame. */
+  /* Clamped, and the number is a sampling limit rather than a physical one.
+   *
+   * A sixtieth of a second at a hundred and sixty degrees a second is
+   * fifty-six pixels of genuine travel at this field of view, and past that
+   * the pass stops keeping up rather than being asked to: the taps would
+   * spread beyond two pixels and start to comb. Failing by blurring slightly
+   * less than reality is invisible; failing by combing is not. It is also what
+   * catches a teleport between capture stops, which is a camera velocity of
+   * some four hundred metres per frame, and the honest answer to "what did the
+   * sensor see during that" is not a streak across the whole frame.
+   *
+   * The old limit was 0.022 in uv, which is thirty-five pixels wide and twenty
+   * tall, and it was the reason a pan stopped getting blurrier at about a third
+   * of that rate. */
   vel *= min(1.0, uMotion.z / speed);
+  speed = min(speed, uMotion.z);
 
   float z0 = -viewZ(d0);
-  /* Interleaved gradient noise on the tap offsets. Eleven taps across a
-   * fifteen-pixel smear is a comb, and a comb reads as a mistake where noise
-   * reads as motion. */
+
+  /* How many taps this pixel gets, which is a property of the pixel and not of
+   * the tier.
+   *
+   * The tier sets a ceiling; what is actually spent is whatever keeps the taps
+   * about two pixels apart along the smear. That matters because the cost and
+   * the artefact are on opposite sides of the same number. A fixed count is
+   * either wasteful at a walking pace — eleven fetches to integrate a
+   * two-pixel smear — or it undersamples in a whip, and undersampling here is
+   * not a soft failure: the taps land far enough apart that each one enters and
+   * leaves as a visible quantum, which across a frame of foliage reads as a
+   * cross-hatch of dither laid over the motion. A pan is also the one moment in
+   * a first-person walk when the tap budget is affordable, because it lasts
+   * about a second and nothing else about the frame has changed.
+   */
+  int n = int(clamp(speed * 0.5, 3.0, float(uTaps)));
+
+  /* Interleaved gradient noise on the tap offsets. Taps evenly spaced across a
+   * smear are a comb, and a comb reads as a mistake where noise reads as
+   * motion. */
   float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
 
   vec3 sum = centre;
   float wsum = 1.0;
   for (int i = 0; i < ${MAX_MOTION}; i++){
-    if (i >= uTaps) break;
+    if (i >= n) break;
     /* Symmetric about now, not trailing behind it. A shutter that opens at
      * the sample instant and closes a frame later puts the sharpest part of
      * every object behind where it appears to be, which is visible as a lag
      * when the camera pans. */
-    float t = ((float(i) + j) / float(uTaps) - 0.5);
+    float t = ((float(i) + j) / float(n) - 0.5);
     vec2 uv = vUv + vel * t;
-    float dt = rawDepth(uv);
-    /* A surface much further away than this pixel did not pass over it during
-     * the exposure — it was behind it the whole time — so letting it in is
-     * how camera blur puts a halo of distant forest around every near trunk.
-     * Nearer taps are kept at full weight: those genuinely did sweep across. */
-    float zt = -viewZ(dt);
-    float w = clamp(1.0 - (zt - z0) / (0.35 * z0 + 1.0), 0.15, 1.0);
+    float zt = -viewZ(rawDepth(uv));
+
+    /* Whether that tap's surface actually swept across this pixel during the
+     * exposure, and this is the term the sky hole was made of.
+     *
+     * The rule it replaces was that a surface much further away than this
+     * pixel did not pass over it — it was behind it the whole time — which is
+     * how camera blur otherwise puts a halo of distant forest around every
+     * near trunk. That rule is sound for translation and wrong for rotation,
+     * and rotation is what a pan is. Turning the camera moves *every* distance
+     * across the sensor at the same angular rate, so a canopy gap and the leaf
+     * in front of it sweep together and the boundary between them genuinely
+     * smears. With a flat depth rejection it did not: the gap is thirty times
+     * brighter than the foliage, so a fifteen per cent weight on it was
+     * invisible from the dark side, the leaf edges survived the blur intact,
+     * and the brightest region in a heavily streaked frame came out with a
+     * hard aliased silhouette around it — the one element that should smear
+     * most reading as the only sharp thing present.
+     *
+     * The physical quantity that distinguishes the two cases is parallax: two
+     * depths move differently only insofar as the camera translated, by the
+     * difference of their reciprocals times that translation. So rejection is
+     * scaled by how much of this pixel's own smear is accounted for by the
+     * disagreement between the two depths. Pure rotation puts that at zero and
+     * rejects nothing; walking forward past a near trunk puts it at one and
+     * rejects as before.
+     */
+    float dv = uPar.x * abs(1.0 / max(zt, 0.25) - 1.0 / max(z0, 0.25));
+
+    float behind = sstep(0.0, 0.35 * z0 + 1.0, zt - z0);
+    float w = 1.0 - 0.85 * behind * clamp(dv / max(speed, 1e-6), 0.0, 1.0);
     sum += textureLod(tScene, uv, 0.0).rgb * w;
     wsum += w;
+  }
+
+  if (uDebug > 0.5){
+    /* Speed against a forty-pixel ramp in red, the clamp binding in green, and
+     * the share of the tap ceiling spent in blue. */
+    gl_FragColor = vec4(min(speed / 40.0, 1.0),
+                        speed >= uMotion.z - 0.01 ? 1.0 : 0.0,
+                        float(n) / float(uTaps), 1.0);
+    return;
   }
   gl_FragColor = vec4(sum / wsum, 1.0);
 }
@@ -921,8 +1012,10 @@ export class Grade {
       tScene: { value: null },
       uInvViewProj: { value: new THREE.Matrix4() },
       uPrevViewProj: { value: new THREE.Matrix4() },
-      uMotion: { value: new THREE.Vector3(0.5, 0.0004, 0.022) },
+      uMotion: { value: new THREE.Vector3(1.0, 0.5, 56.0) },
+      uPar: { value: new THREE.Vector3(0, 1600, 900) },
       uTaps: { value: 7 },
+      uDebug: { value: 0 },
     }));
     this.cocMat = this._mat('coc', COC_FRAG, Object.assign({}, shared, {
       tScene: { value: null },
@@ -1031,7 +1124,17 @@ export class Grade {
       mu.uInvViewProj.value.copy(this._vp).invert();
       mu.uPrevViewProj.value.copy(jump ? this._vp : this._prevVP);
       mu.uMotion.value.x = this.shutter;
+      /* Parallax, in pixels per dioptre: how far the image of a surface one
+       * metre away slid across the sensor because the camera itself moved,
+       * which is what separates a translation from a rotation for the gather.
+       * Isotropic in pixels — the projection's vertical scale times the frame
+       * height is the same quantity as the horizontal pair — so it needs one
+       * number rather than one per axis. */
+      const tr = jump ? 0 : this._prevPos.distanceTo(camera.position);
+      mu.uPar.value.set(tr * camera.projectionMatrix.elements[5] * 0.5 * t.ph * this.shutter,
+                        t.pw, t.ph);
       mu.uTaps.value = cfg.motion;
+      mu.uDebug.value = this.debug === 5 ? 1 : 0;
       this._draw(this.motionMat, t.motion);
       src = t.motion.texture;
       this._prevVP.copy(this._vp);
