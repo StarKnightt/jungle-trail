@@ -21,7 +21,8 @@ import { DIRT, LITTER, ROCK, MACRO } from './groundTex.js';
 import { bakeSurface } from '../gfx/bake.js';
 import { SSTEP } from '../gfx/glsl.js';
 import {
-  POOL, POOL_Y, causeway, spillwayCut, spillwayWet, runLevel, poolBed,
+  POOL, POOL_Y, causeway, spillwayCut, spillwayWet, runLevel, poolBed, chuteWet,
+  standingWater,
 } from './spillway.js';
 import { Brook, swallowCut, sinkWet } from './brook.js';
 
@@ -343,10 +344,34 @@ export class Terrain {
    * polished tar. One channel, two regimes, no second attribute.
    */
   evalWet(x, z, h, q) {
-    let w = 0.80 * smoothstep(POOL.r + 7, POOL.r - 2,
-                              Math.hypot(x - POOL.x, z - POOL.z));
+    const dPool = Math.hypot(x - POOL.x, z - POOL.z);
+    let w = 0.80 * smoothstep(POOL.r + 7, POOL.r - 2, dPool);
     w = Math.max(w, 0.80 * this.brook.wetAt(q));
     w = Math.max(w, 0.80 * sinkWet(x, z));
+
+    /* Every bed the water is actually standing on, soaked.
+     *
+     * Everything above tops out at 0.8, and the material reads the band above
+     * that as a separate *soak* regime — see the note on the split. Damp ground
+     * keeps its leaf litter, which is correct for a shaded hollow and wrong for
+     * a riverbed. The basin read as a carpet of intact broad leaves seen
+     * through a film and the brook read as a dry gully, both for the same
+     * reason: what you see through shallow water is the bed, so a litter bed
+     * under a dark film is a path and a scoured black one is water.
+     *
+     * Asked through `standingWater` rather than reimplemented, so the basin,
+     * the run down from the alcove, the brook, the swallow's funnel and the
+     * feed above the lip are all soaked by one expression, and none of them can
+     * ever disagree with the mesh that is drawing the water over it. The ramp
+     * is two centimetres deep, which puts the whole of the transition inside
+     * the shoreline rather than spread over the bank. */
+    const sw = standingWater(x, z, h, this.brook, q);
+    if (sw > 0.0) w = Math.max(w, Math.min(1, 0.90 + 4.0 * sw));
+    /* And a hand's breadth of bank beyond the waterline, because a stream
+     * undercuts its banks and keeps the first foot of them black. Without it
+     * the soak stops exactly on the water's edge, which reads as a decal. */
+    w = Math.max(w, this.brook.soakAt(q));
+    w = Math.max(w, chuteWet(x, z));
     // The channel the water actually runs down, which the pool term above
     // does not reach: it lies outside the basin and along the cliff foot.
     w = Math.max(w, 0.80 * spillwayWet(x, z) * (h < runLevel(z) + 1.6 ? 1 : 0.55));
@@ -664,7 +689,7 @@ export function makeTerrainMaterial(renderer) {
       // are computed once into globals rather than three times.
       vec3 gW; vec2 gUvF; vec2 gUvW; float gWall;
       vec3 gMacro; vec3 gMid; float gMoss; float gWet; float gAO; float gRough;
-      float gSoak;
+      float gSoak; float gRockS;
 
       /* World periods, chosen from the real size of the features each map
        * contains: ~2 m of trail surface, ~1.1 m of leaf litter (so the blades
@@ -758,6 +783,21 @@ export function makeTerrainMaterial(renderer) {
         gW.z += (1.0 - gW.x - gW.y - gW.z) * gSoak;
         gW /= max(1e-3, gW.x + gW.y + gW.z);
 
+        /* And the stone under running water is a different *size* of stone.
+         *
+         * The rock maps are authored at a 3.6 m period, which is a bedding
+         * plane — right for eighteen metres of cliff and completely wrong for a
+         * streambed, where at that scale the voronoi cells come out half a
+         * metre across and the channel reads as a paved Roman lane. A bed is
+         * cobbles: fist to head sized, so about a fifth of that.
+         *
+         * Gated on flatness rather than on the soak alone, because the other
+         * place the soak reaches full strength is the cliff face inside the
+         * splash radius, and that genuinely is a bedding plane. The wall term
+         * is already computed and separates the two exactly. Costs nothing —
+         * the scale is an argument to the same fetch. */
+        gRockS = S_ROCK * (1.0 + 2.4 * gSoak * (1.0 - gWall));
+
         // Moss grows on the flat, the shaded and the damp, and not on the part
         // that gets walked on. Tying it to all four is what makes it land in
         // plausible places instead of scattering evenly.
@@ -806,13 +846,13 @@ export function makeTerrainMaterial(renderer) {
 
            vec3 alb = biplanar(tDirtA, S_DIRT) * gW.x
                     + litA * gW.y
-                    + biplanar(tRockA, S_ROCK) * gW.z;
+                    + biplanar(tRockA, gRockS) * gW.z;
 
            // ORM is fetched once here and reused by the roughness stage below,
            // which runs later in three's chunk order.
            vec3 orm = biplanar(tDirtO, S_DIRT) * gW.x
                     + biplanar(tLitO, S_LIT) * gW.y
-                    + biplanar(tRockO, S_ROCK) * gW.z;
+                    + biplanar(tRockO, gRockS) * gW.z;
            gAO = orm.r; gRough = orm.g;
 
            alb *= 0.78 + 0.44 * gMacro.x;
@@ -821,12 +861,17 @@ export function makeTerrainMaterial(renderer) {
            // Wet ground is darker because the water film traps light in the
            // surface; it is not just a grey overlay.
            alb = mix(alb, alb * uWetTint * 2.1, gWet * 0.55);
-           /* Saturated, not just dark. A water film raises the effective
-            * index of the surface, which suppresses the diffuse escape of
-            * light and leaves what does come back more strongly coloured —
-            * so soaked rock is close to black but its hue is *more* present,
-            * not less. Scaling toward zero alone gives grey mud. */
-           alb = mix(alb, normalize(alb + 1e-4) * length(alb) * 0.30, gSoak);
+           /* A water film raises the effective index of the surface, which
+            * suppresses the diffuse escape of light: soaked rock is close to
+            * black. Just under a quarter, and the hue rides through unchanged:
+            * normalizing a vector and then multiplying by its own length gives
+            * the vector back, so the form this replaces was a scale and nothing
+            * else, whatever the note on it claimed. It does not
+            * need to do more: measured on the streambed the albedo comes out at
+            * 47 per cent saturation against 30 to 40 for everything around it,
+            * because what it is scaling is already rock and moss rather than
+            * litter. What was washing the bed out was its specular, not this. */
+           alb = mix(alb, alb * 0.22, gSoak);
 
            /* Baked cavity occlusion, applied to albedo.
             *
@@ -883,7 +928,7 @@ export function makeTerrainMaterial(renderer) {
           '#include <normal_fragment_maps>',
           `vec3 mapN = (biplanar(tDirtN, S_DIRT) * gW.x
                       + biplanar(tLitN, S_LIT) * gW.y
-                      + biplanar(tRockN, S_ROCK) * gW.z) * 2.0 - 1.0;
+                      + biplanar(tRockN, gRockS) * gW.z) * 2.0 - 1.0;
            mapN.xy *= normalScale;
            // A film of water fills in the micro-relief, so wet ground is
            // visibly flatter as well as darker and shinier.
@@ -900,7 +945,30 @@ export function makeTerrainMaterial(renderer) {
             * the darkest in frame. */
            float ao = pow(clamp(gAO, 0.0, 1.0), 1.4);
            reflectedLight.indirectSpecular *= ao;
-           reflectedLight.directSpecular *= mix(0.55, 1.0, ao);`
+           reflectedLight.directSpecular *= mix(0.55, 1.0, ao);
+           /* And the soak's share of the image-based term goes, which is the
+            * same finding the water material arrived at twice and the reason a
+            * submerged streambed measured brighter than the sunlit dirt on its
+            * own bank.
+            *
+            * Written out on its own, the specular on the bed came back at 70 of
+            * 255 — four times its own albedo — at three per cent saturation and
+            * with only thirty values of spread across a surface carrying strong
+            * dappled shadow. So it is not the sun glint: that would be black in
+            * the shade and clipping in the light. It is three's uniform sky dome
+            * on a surface the soak has taken to roughness 0.2, where the
+            * multi-scattering term on a dielectric is large and integrates to a
+            * constant. A neutral constant is the worst thing that can happen to
+            * this frame — every other surface in it sits between thirty and
+            * forty per cent saturation, so a grey slab in the middle of them
+            * reads as poured concrete, which is exactly how the channel read.
+            *
+            * The direct term is left alone on purpose. A wet surface is glossy
+            * and the sun glint is most of what says so, but it is directional,
+            * it rides the surface normal and it goes to nothing in shade, so it
+            * cannot flatten anything. Cutting one and not the other is the same
+            * asymmetry the pool needed. */
+           reflectedLight.indirectSpecular *= mix(1.0, 0.14, gSoak);`
         )
         .replace(
           '#include <roughnessmap_fragment>',
@@ -922,12 +990,25 @@ export function makeTerrainMaterial(renderer) {
            // scene. The floor has to make way for it or the soak reads as a
            // dark patch rather than as a wet one, and gloss is most of what
            // says wet: the darkening on its own is just a stain.
-           roughnessFactor = max(mix(roughnessFactor, 0.10, gSoak),
-                                 mix(0.60, 0.09, gSoak));`
+           /* Glossy, but no longer a mirror. At 0.09 the soak returned a hard
+            * specular sheet wherever a sun shaft crossed it, and the two places
+            * that shows are the streambed and the basin floor — both of which
+            * are *under* water, where the highlight belongs to the surface over
+            * them and not to the gravel beneath. The channel came back reading
+            * as a wet paved lane. 0.17 still leaves it the glossiest ground in
+            * the scene, which is what the splash zone needs. */
+           roughnessFactor = max(mix(roughnessFactor, 0.17, gSoak),
+                                 mix(0.60, 0.16, gSoak));`
         );
   };
   mat.customProgramCacheKey = () => 'terrain-splat-v1';
 
   mat.userData.maps = { dirt, litter, rock, macro };
+  /* The uniform block, reachable before the first compile. `userData.shader`
+   * only appears once three has built a program for this material, and the
+   * capture harness sets a uniform, poses the camera and renders in that
+   * order — so from there it is reliably undefined at the moment it is
+   * wanted, and `uDebug` silently does nothing. */
+  mat.userData.uniforms = U;
   return mat;
 }

@@ -385,6 +385,7 @@ class Game {
     // pixels tall the frame is or the plume changes physical size with the
     // window and with whatever DPR the current tier picked.
     this.water?.setViewportHeight(v.y);
+    this.water?.setReflectionSize(v.x, v.y);
   }
 
   setTier(name) {
@@ -445,6 +446,13 @@ class Game {
      * rather than per material, because they all share the same uniform
      * object by reference. */
     this.canopy.uniforms.uViewToWorld.value.copy(this.camera.matrixWorld);
+
+    /* Before the offscreen buffer is claimed, because this is a render of its
+     * own into a target of its own and nesting it inside the scene pass would
+     * mean saving and restoring the one the post chain is counting on. It also
+     * has to come before the scene rather than after it for the obvious
+     * reason: the pool samples the result. */
+    this.water?.renderReflection(this.scene, this.camera);
 
     this.atmos.beginScene();
     this.body.prepareShadowPass();

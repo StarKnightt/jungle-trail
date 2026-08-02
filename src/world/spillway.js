@@ -225,6 +225,41 @@ export const spillFloor = (z) => tableAt(FLOOR, z);
 export const spillHalf = (z) => tableAt(HALF, z);
 export const spillCentre = (z) => tableAt(CENTRE, z);
 
+/* The stretch of channel above the lip that has water running down it.
+ *
+ * The downstream end is the upstream end of the curtain's own geometry, and the
+ * upstream end is where the authored floor stops being below the ground the
+ * noise put there — past about -399 the table's last row sits *above* the
+ * hillside, so anything keyed to it up there would be water in mid-air.
+ *
+ * It exists as a pair of exported numbers because three files need the same
+ * answer to "is this point in the feed": water.js lays the tongue in it,
+ * standingWater() has to keep plants out of it, and the terrain's wetness
+ * field has to soak it. The lip shot before this existed showed the fall
+ * emerging from a strip of dry sunlit dirt with a seedling growing in it,
+ * which is a stronger tell than anything the curtain itself was doing wrong:
+ * water arrives from somewhere, and the somewhere has to look used.
+ */
+export const CHUTE_Z0 = -399.0;
+export const CHUTE_Z1 = -391.3;
+
+/** Surface of the tongue in the chute, matching what water.js lays there. */
+export function chuteLevel(z) {
+  return spillFloor(z) + 0.30;
+}
+
+/** 0..1 soak along the feeding channel above the lip, for the wetness field. */
+export function chuteWet(x, z) {
+  if (z > CHUTE_Z1 + 1.0 || z < CHUTE_Z0 - 3.0) return 0;
+  const a = Math.abs(x - spillCentre(z));
+  /* Wider than the wetted width, because the corridor a fall keeps wet is
+   * wider than the water in it — spray off the lip, and the channel's own
+   * banks. Feathered at both ends so it does not terminate on a contour. */
+  return smoothstep(Math.min(spillHalf(z), 3.4) + 2.2, 1.2, a)
+       * smoothstep(CHUTE_Z1 + 1.0, CHUTE_Z1 - 0.4, z)
+       * smoothstep(CHUTE_Z0 - 3.0, CHUTE_Z0 + 0.6, z);
+}
+
 /** Height of the free water surface between the alcove and the pool. */
 export function runLevel(z) {
   return z > -366 ? POOL_Y : tableAt(LEVEL, z);
@@ -312,6 +347,15 @@ export function standingWater(x, z, h, brook = null, q = null) {
     // No feather: this is a containment test, and a soft edge here would leave
     // a band of half-rejected plants paddling along both banks.
     if (Math.abs(x - spillCentre(z)) < hw) surf = runLevel(z);
+    /* Above the lip the run level means nothing — it is the level of the water
+     * sixteen metres *below* — so a point in the chute measured against it is
+     * dry by twenty-five metres and the scatter was free to root a seedling in
+     * the middle of the feed. The tongue's own surface is the right question
+     * there, and it is the same expression water.js builds the mesh from. */
+    if (z <= CHUTE_Z1 && z >= CHUTE_Z0
+        && Math.abs(x - spillCentre(z)) < Math.min(hw, 3.4)) {
+      surf = Math.max(surf, chuteLevel(z));
+    }
   }
   if (poolBed(x, z) < POOL_Y) surf = Math.max(surf, POOL_Y);
   let d = Math.max(0, surf - h);

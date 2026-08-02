@@ -100,6 +100,26 @@ const BANK_H = 1.80;
 const BANK_RUN = 2.10;
 const BANK_FEATHER = 3.40;
 
+/* How far the flat floor runs out past the nominal wetted half-width, and
+ * therefore where the water's edge actually is.
+ *
+ * It has to be one number in one place, because three things read it: `cut()`
+ * levels the floor out to it so the shoreline lands on level ground, the mesh
+ * is built a little wider than it so the depth test can put the waterline
+ * somewhere inside the geometry rather than on its edge, and `depthAt()` has to
+ * agree or the scatter roots plants in water that is drawing.
+ *
+ * The mesh being wider than the water is the point. A surface mesh cut to
+ * exactly the wetted width ends on a straight line at full depth and full
+ * alpha, which is a hard polygon edge across the frame — the same artefact as
+ * the curtain's bottom edge, and in `brook_macro` it read as a diagonal join
+ * between a sheet of plastic and a paved floor. Carried up the bank instead,
+ * the shoreline is wherever the bed crosses the surface, so it wanders with the
+ * ground and with the ripple and there is no straight line anywhere in it.
+ */
+const WET_MARGIN = 0.55;
+const MESH_MARGIN = 0.95;
+
 export class Brook {
   /**
    * @param {(t:number) => {py:number, px:number, pz:number, tx:number,
@@ -171,12 +191,80 @@ export class Brook {
       const grade = Math.max(0, (a.y - b.y) / run);
       st[i].grade = grade;
       st[i].speed = Math.max(0.35, Math.min(3.2, 0.45 + 20.0 * grade));
-      st[i].agit = Math.min(0.9, 0.05 + 0.85 * smoothstep(0.025, 0.115, grade));
+      /* The riffle-pool sequence, which is the form every stream on a low grade
+       * takes and the only way a *level* reach can have white water in it.
+       *
+       * The last sixty metres before the basin have no grade to give: the
+       * clearing floor sits barely half a metre above the pool, so the surface
+       * down there is flat by hydrology and no authoring can put a step in it.
+       * That is also the only stretch of the brook the player ever walks beside,
+       * so keying the white water to the grade alone meant there was none of it
+       * anywhere it counts, and sixty metres of dark motionless film in a gully
+       * reads as wet stone rather than as a stream.
+       *
+       * What a level reach does have is bars. Gravel collects in alternating
+       * shoals; the water thins to a hand's depth over each one and breaks
+       * white, and between them it is deeper, slower and dark. Two
+       * incommensurate periods, so no two bars are the same distance apart and
+       * the sequence never repeats over the length of the walk.
+       *
+       * The threshold is high on purpose. Foam coverage is a threshold process
+       * and the material squares this number before using it, both of which
+       * exist to stop a flat white ribbon; the answer is not to raise the floor
+       * until the glides go pale, it is to make the crests genuinely white and
+       * leave the pools genuinely dark. Contrast is what reads as moving water. */
+      const bar = 0.5 + 0.5 * Math.sin(st[i].t * 190.0)
+                            * Math.sin(st[i].t * 77.0 + 2.1);
+      st[i].bar = bar;
+      /* The white water gets its own signal, at a bar's own wavelength.
+       *
+       * `bar` above still shapes the bed, because the channel it cut is the one
+       * that was confirmed good and there is nothing to gain by moving it. What
+       * it is wrong for is the foam, and measurement is what settled that: its
+       * fast period is fourteen metres of trail, so each crest holds the term
+       * over threshold for seven of them — and since a station carries one
+       * number for its whole cross-section, seven metres of stream went white
+       * from bank to bank at once. Measured coverage over the reach the walk
+       * actually passes was a third of a unit at every column of the mesh,
+       * which is not a riffle, it is a weir.
+       *
+       * A gravel shoal in a two-metre channel is two or three metres long, so
+       * the period here is five and a half; and it sits on one side at a time,
+       * swinging every twenty-odd metres, which is what a stream on a low grade
+       * builds. The lateral half of that can only be applied where a lateral
+       * coordinate exists, which is the mesh builder in water.js — so the side
+       * is published here and spent there.
+       */
+      const rif = 0.5 + 0.5 * Math.sin(st[i].t * 470.0)
+                            * Math.sin(st[i].t * 131.0 + 2.1);
+      st[i].barSide = Math.sin(st[i].t * 61.0 + 0.4) < 0 ? -1 : 1;
+      /* The floor is a tenth, not a sixth, and the bar threshold is narrow.
+       *
+       * Measured coverage with the previous numbers was most of the channel:
+       * the floor alone put every glide over the material's foam threshold, the
+       * bar term reached full strength over about half the length, and the
+       * shoal term in water.js added a third contribution on top. A debug pass
+       * of the foam channel came back near-white from bank to bank, which is
+       * the "bath full of milk" this was all supposed to prevent — arrived at
+       * by three separate terms each of which looked reasonable alone.
+       *
+       * What reads as moving water is the *contrast*, so the glides have to be
+       * genuinely dark: a tenth of a unit squares to one per cent and produces
+       * no foam at all, which is correct for a slow reach of tannic water. All
+       * of the white is then spent where there is a reason for it — over a bar,
+       * under a step, or behind a rock. */
+      /* Held as two terms rather than one maximum, because they are spent
+       * differently downstream: the grade's share belongs to the whole width of
+       * the channel and the shoal's belongs to one side of it. */
+      st[i].agitFlow = Math.max(0.10, Math.min(0.9,
+                        0.05 + 0.85 * smoothstep(0.025, 0.115, grade)));
+      st[i].agitBar = 0.82 * smoothstep(0.60, 0.93, rif);
+      st[i].agit = Math.max(st[i].agitFlow, st[i].agitBar);
       /* Deeper directly below a step, because that is where the falling water
        * digs. A plunge pool at this scale is 20 cm across and the reason to
        * have it is that it is the only dark water in the stream, and a
        * riffle with no dark water in it is a white rope. */
-      st[i].bed = st[i].y - (GLIDE_DEPTH + 1.1 * grade);
+      st[i].bed = st[i].y - (GLIDE_DEPTH * (0.62 + 0.62 * bar) + 1.1 * grade);
     }
 
     /* Drowned at the tail. Everything below the basin's surface is backwater —
@@ -184,7 +272,17 @@ export class Brook {
      * there is a step in the water where the two meet. Taking the max cannot
      * break the monotonicity because the pool level is a constant. */
     for (const s of st) {
-      if (s.y < poolY) { s.y = poolY; s.speed = Math.min(s.speed, 0.5); s.agit *= 0.3; }
+      if (s.y < poolY) {
+        s.y = poolY;
+        s.speed = Math.min(s.speed, 0.5);
+        /* The riffles survive the drowning and the grade-driven part does not.
+         * Backwater is slow, but a bar in it is still a bar: the water still
+         * shallows over it and still breaks. Killing the whole term here is
+         * what left the visible reach with nothing. */
+        s.agitFlow = 0.10;
+        s.agitBar *= 0.80;
+        s.agit = Math.max(s.agitFlow, s.agitBar);
+      }
     }
 
     this.st = st;
@@ -228,7 +326,7 @@ export class Brook {
      * level ground rather than on the toe of the bank. A shoreline that sits
      * on a slope is a shoreline whose position moves by a metre for every
      * centimetre the terrain's bilinear sample is out. */
-    const inner = a.half + 0.55;
+    const inner = a.half + WET_MARGIN;
     if (d > inner + BANK_FEATHER) return h;
     const f = a.bed + BANK_H * smoothstep(inner, inner + BANK_RUN, d);
     if (f >= h) return h;
@@ -245,9 +343,12 @@ export class Brook {
     const t = q.t;
     if (t <= BROOK_T0 || t >= BROOK_T1) return 0;
     const a = this.at(t, this._tmp2 || (this._tmp2 = {}));
-    if (Math.abs(q.side - a.off) > a.half) return 0;
+    if (Math.abs(q.side - a.off) > a.half + WET_MARGIN) return 0;
     return Math.max(0, a.y - h);
   }
+
+  /** Half-width of the mesh the water surface is drawn on. */
+  meshHalf(a) { return a.half + MESH_MARGIN; }
 
   /** 0..1 wetted-margin field, for the terrain's wetness channel. */
   wetAt(q) {
@@ -256,6 +357,57 @@ export class Brook {
     const a = this.at(t, this._tmp3 || (this._tmp3 = {}));
     return smoothstep(a.half + 2.6, a.half + 0.2, Math.abs(q.side - a.off))
          * smoothstep(BROOK_T0, BROOK_T0 + 0.06, t);
+  }
+
+  /**
+   * 0..1 *soak* field: the bed itself and the first metre of bank.
+   *
+   * `wetAt` is capped at the damp end of the terrain's wetness channel by its
+   * caller, which is right for a stream margin and wrong for the bed, because
+   * damp ground keeps its leaf litter — and a channel floored with intact dry
+   * leaves is the reason the brook read as a gully rather than as a stream
+   * however good the water over it looked. A streambed under running water is
+   * scoured to cobble, its banks are undercut and black, and both of those are
+   * the top of the range rather than the middle of it.
+   *
+   * It is also the contrast the water depends on. The surface is nearly
+   * transparent in the shallows by design, so what the eye actually reads
+   * there is the bed; a bright litter bed under a dark film reads as a dry
+   * path, and a black wet bed under the same film reads as water.
+   */
+  /**
+   * Metres from the wetted edge, negative inside the water. Huge if off-reach.
+   *
+   * The scatter uses it to hold the taller species off the bank. That is not
+   * gardening: a channel with running water in it is scoured and undercut for
+   * the first foot of its banks and nothing broad-leaved gets established
+   * there, and the reason it matters here is that without it the brook was
+   * *invisible in normal play* — a two-metre stream under a jungle understory
+   * that closes over it, so the eye-height frame the player actually gets is
+   * solid foliage with a dark slot somewhere behind it. Everything else about
+   * the water is irrelevant if nothing can see it.
+   */
+  clearAt(q) {
+    const t = q.t;
+    if (t <= BROOK_T0 || t >= BROOK_T1) return 1e9;
+    const a = this.at(t, this._tmp5 || (this._tmp5 = {}));
+    return Math.abs(q.side - a.off) - (a.half + WET_MARGIN);
+  }
+
+  soakAt(q) {
+    const t = q.t;
+    if (t <= BROOK_T0 - 0.02 || t >= BROOK_T1 + 0.02) return 0;
+    const a = this.at(t, this._tmp4 || (this._tmp4 = {}));
+    /* A metre and three quarters of bank rather than one, because the width is
+     * what decides whether the feature reads at all. From eye height on the
+     * trail the bank is foreshortened to almost nothing — a one-metre soak band
+     * on a bank standing at fifty degrees is a couple of pixels of dark edging,
+     * which the litter above it swallows. Undercut banks under running water are
+     * black for a good deal further than that anyway. */
+    return smoothstep(a.half + WET_MARGIN + 1.75, a.half + WET_MARGIN - 0.2,
+                      Math.abs(q.side - a.off))
+         * smoothstep(BROOK_T0, BROOK_T0 + 0.06, t)
+         * smoothstep(BROOK_T1 + 0.02, BROOK_T1 - 0.02, t);
   }
 }
 

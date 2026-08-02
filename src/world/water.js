@@ -43,6 +43,7 @@ import {
   POOL, POOL_Y, spillFloor, spillHalf, spillCentre, runLevel, ALCOVE_Y, poolBed,
 } from './spillway.js';
 import { SWALLOW, swallowDip } from './brook.js';
+import { PlanarMirror } from '../render/mirror.js';
 
 const G = 9.81;
 
@@ -138,6 +139,21 @@ const smoothstep = (e0, e1, x) => {
   return t * t * (3 - 2 * t);
 };
 
+/* Resolution of the pool's reflection, as a fraction of the frame in each
+ * axis. See render/mirror.js for the pass itself.
+ *
+ * A third rather than a half, and the number was measured rather than guessed:
+ * captures of the basin at 0.5, 0.35 and 0.25 are indistinguishable by eye and
+ * agree to one unit of luma on every percentile of the water's histogram. That
+ * is not surprising once stated — the reflection is displaced by the ripple
+ * normal before it is sampled and then scaled by a Fresnel term that is only
+ * large where the surface is foreshortened to nothing, so the one place it
+ * matters is the place where a screen pixel already covers metres of the
+ * reflected world. Halving it again halves the cost of the only expensive
+ * thing in this system.
+ */
+const MIRROR_SCALE = { high: 0.36, ultra: 0.5 };
+
 /* Shared by the pool and the brook, which really are the same material: an
  * open water surface with a flow vector and a foam load. Splitting them would
  * double the programs for no visual difference. */
@@ -151,10 +167,23 @@ uniform vec3 uSkyRefl;
 uniform vec3 uBankRefl;
 uniform vec3 uFoamCol;
 uniform float uWaterDbg;
+/* The planar reflection, and the flag that says whether there is one this
+ * frame. See render/mirror.js: the pass is skipped whenever the pool is off
+ * screen, which is most of the walk, so the material has to keep working with
+ * nothing in the texture — hence a strength rather than a compile-time
+ * branch. */
+uniform sampler2D tMirror;
+uniform float uMirror;
+uniform float uMirrorY;
+/* The basin's plan, so the surface can tell a stream from the pool it runs
+ * into. See gStream in the colour block. */
+uniform vec2 uPoolC;
+uniform float uPoolR;
 varying vec3 vWorldW;
 varying float vBedW;
 varying float vAgitW;
 varying vec2 vFlowW;
+varying vec4 vMirrorP;
 
 /* One sample of a tiling map in the local flow frame.
  *
@@ -231,8 +260,61 @@ export class Water {
     if (this.spray) this.spray.renderOrder = 14;
 
     /** Exposed for main.js to hand to patchCanopyLight. */
-    this.materials = [this.surfaceMat, this.curtainMat, this.boilMat];
+    this.materials = [this.surfaceMat, this.streamMat, this.curtainMat, this.boilMat];
+
+    /* The pool's reflection. Centred on the basin rather than on the pool
+     * mesh's own bounds, because that mesh also carries the rapids and the
+     * alcove sixteen metres away and a bounding sphere around all three would
+     * keep the pass alive from most of the clearing. Radius covers the basin
+     * and the brook's drowned delta, which is the other surface at this level.
+     *
+     * Off below `high`. It is one extra pass of the scene, and the tiers under
+     * this one exist for machines that were already dropping frames — the
+     * material falls back to the graded analytic reflection there, which is
+     * what it used before this existed. */
+    this.mirror = new PlanarMirror(renderer, POOL_Y, {
+      centre: new THREE.Vector3(POOL.x + 1.0, POOL_Y, POOL.z - 2.0),
+      radius: 18,
+      range: 115,
+      enabled: this.tier === 'high' || this.tier === 'ultra',
+      scale: MIRROR_SCALE[this.tier] || 0.36,
+    });
+    this._surfaceUniforms().uMirrorY.value = POOL_Y;
   }
+
+  /**
+   * Render the pool's reflection. Call once per frame, before the scene pass
+   * claims the offscreen buffer.
+   *
+   * Returns whether the pass actually ran, which the perf tooling reports: for
+   * most of the walk it does not, and a reflection that is free everywhere
+   * except the twenty seconds it is visible is the only version of this feature
+   * worth having.
+   */
+  renderReflection(scene, camera) {
+    const u = this._surfaceUniforms();
+    /* The three surfaces at or near the plane, hidden for the pass. The pool
+     * would feed its own texture back into itself; the brook's delta and the
+     * cascade stand between the mirrored camera and the world above the water
+     * and would fill the reflection with the underside of a water film. The
+     * curtain and the churn are left in deliberately — the fall's white base
+     * reflected in the basin under it is most of what makes the frame read as
+     * water rather than as a hole.
+     *
+     * The spray is not, and that is a cost decision rather than an artistic
+     * one: it is five thousand additive sprites and it is the most fill-bound
+     * object in the scene, while what it contributes to a reflection is a faint
+     * pale haze in front of a fall that is already the brightest thing in the
+     * frame. Measured at three quarters of a millisecond for something no
+     * capture could distinguish. */
+    const ran = this.mirror.render(scene, camera,
+      [this.poolMesh, this.brookMesh, this.chuteMesh, this.spray]);
+    u.tMirror.value = this.mirror.texture;
+    u.uMirror.value = ran ? 1 : 0;
+    return ran;
+  }
+
+  setReflectionSize(w, h) { this.mirror?.setSize(w, h); }
 
   /* ---------------------------------------------------------------- flow */
 
@@ -343,7 +425,32 @@ export class Water {
 
   /* --------------------------------------------------------- the surface */
 
+  /* Two materials off one program, and the difference between them is a single
+   * uniform. See `uStream` below for what it does and why it has to exist.
+   *
+   * They share `customProgramCacheKey`, so this costs one extra material and no
+   * extra compile: three caches the program by that key and keeps the uniform
+   * set per material. Everything they have in common — the ripple textures, the
+   * clock, the palette — is the same uniform *object* in both, so there is one
+   * place to set the time and one place to grade the colours.
+   */
   _buildSurfaceMaterial() {
+    this.surfaceMat = this._makeSurfaceMat(0.0);
+    /* The brook. A pool and a stream are the same
+     * physics and they are not the same picture, and the reason they need
+     * separating is a measurement: the specular path in this material is scaled
+     * down by three to five times to stop the *pool* blowing out, because a
+     * 30 x 50 m mirror seen from eye height is at grazing incidence over almost
+     * its whole visible area and three's multi-scattering term there is
+     * enormous. A two-metre channel is never in that regime — you look down
+     * into it at forty degrees, not across it at two — so the same scaling
+     * leaves it with no specular at all, and water in shade with no specular is
+     * not dark water, it is nothing. The brook measured out as a slightly
+     * lighter stripe of dirt, which is precisely what the critique saw. */
+    this.streamMat = this._makeSurfaceMat(1.0);
+  }
+
+  _makeSurfaceMat(stream) {
     const m = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       roughness: 0.17,
@@ -371,11 +478,21 @@ export class Water {
        * printed on it, which is what the arrival shot showed. The reflection
        * has to stay in range so that the ripple riding on it is visible: a
        * clipped highlight has no texture in it by definition. */
-      envMapIntensity: 0.42,
+      /* And the stream gets nearly three times as much, for the reason the
+       * two materials exist at all. The number above is set by a thirty-metre
+       * mirror seen at two degrees, where the Fresnel term is one over the
+       * whole visible area and any image-based specular is the entire shading.
+       * A two-metre channel is looked *down into* at thirty or forty degrees,
+       * where the same term is two or three per cent — so the pool's setting
+       * leaves it with no reflected sky at all, and water in shade with no
+       * reflected sky is not dark water, it is a wet path. This is the single
+       * measurement that decides whether the brook reads as a stream. */
+      envMapIntensity: stream > 0.5 ? 1.15 : 0.42,
     });
 
     m.onBeforeCompile = (sh) => {
-      Object.assign(sh.uniforms, this._surfaceUniforms());
+      Object.assign(sh.uniforms, this._surfaceUniforms(),
+                    { uStream: { value: stream } });
       // Convention shared with the other patched materials here, so the
       // console and the capture tools have one place to reach the uniforms.
       m.userData.shader = sh;
@@ -387,10 +504,28 @@ export class Water {
         varying float vBedW;
         varying float vAgitW;
         varying vec2 vFlowW;
+        varying vec4 vMirrorP;
       ` + sh.vertexShader.replace('#include <begin_vertex>', /* glsl */ `
         #include <begin_vertex>
         vWorldW = (modelMatrix * vec4(transformed, 1.0)).xyz;
         vBedW = aBed; vAgitW = aAgit; vFlowW = aFlow;
+      `)
+        /* The reflection's texture coordinate, which is simply this fragment's
+         * own screen position.
+         *
+         * That is exact rather than approximate, and it is worth writing down
+         * why, because the usual formulation carries a whole texture matrix in
+         * order to say the same thing. A point on the mirror plane is a fixed
+         * point of the reflection, so it lies on the same ray through both
+         * cameras and lands on the same pixel; and render/mirror.js skews only
+         * the third row of the mirrored projection, so the horizontal and
+         * vertical mapping the two cameras use is identical. The projected
+         * position is therefore all that is needed, and it is resolution
+         * independent, which a gl_FragCoord scheme is not. */
+        .replace('#include <project_vertex>', /* glsl */ `
+        #include <project_vertex>
+        vMirrorP = vec4(gl_Position.xy * 0.5 + gl_Position.w * 0.5,
+                        gl_Position.zw);
       `);
 
       /* The two injections are in the order three runs them, which is the
@@ -413,6 +548,40 @@ export class Water {
           gWaterSpd = spd;
           gWaterDepth = vWorldW.y - vBedW;
 
+          /* How much of a *stream* this fragment is, which is not the same
+           * question as which mesh it belongs to, and the difference showed up
+           * as the worst seam in the system.
+           *
+           * The two materials exist because a thirty-metre basin at grazing
+           * incidence and a two-metre channel looked down into need opposite
+           * specular budgets — see _buildSurfaceMaterial. What that split gets
+           * wrong is the brook's last few metres: the channel opens into a delta
+           * *inside the plunge basin*, drowned to exactly the pool's level, and
+           * that delta was still being given the channel's gain. The result was
+           * a pale mottled quadrilateral with a hard straight edge lying across
+           * the middle of the pool, reading as a sheet of plastic floating on
+           * it. The brook's delta is not a stream. It is the pool, and the test
+           * for that is where it is rather than what drew it.
+           */
+          float basin = 1.0 - sstep(uPoolR - 2.0, uPoolR + 2.5,
+                                    length(vWorldW.xz - uPoolC));
+          gStream = uStream * (1.0 - basin);
+          /* envMapIntensity is a material constant and cannot follow the line
+           * above, so the stream material's extra radiance has to be taken back
+           * out by hand wherever it is behaving as pool water. 0.42 over 1.15,
+           * which is the ratio of the two settings. */
+          gEnvFix = mix(1.0, 0.365, uStream * (1.0 - gStream));
+
+          /* Whether this fragment is on the mirrored plane, which is not the
+           * same question as whether it is water. One grid carries the basin,
+           * the rapids and the alcove, and the second and third of those stand
+           * one and a half metres above the pool — a reflection rendered for
+           * y = 0.05 sampled up there is the right image in the wrong place,
+           * and it shows up as the far bank appearing to float inside the
+           * cascade. The brook's drowned tail *is* at pool level and does want
+           * it, so the test is height rather than which mesh this is. */
+          gMirror = uMirror * (1.0 - sstep(0.06, 0.55, abs(vWorldW.y - uMirrorY)));
+
           /* Two layers, and they must not share a speed. One layer at any
            * scale is a single velocity and the eye locks onto it in about a
            * second; two moving at 1.0 and 0.62 of the current have no common
@@ -422,10 +591,18 @@ export class Water {
            * because that is what a wave train in a current does. */
           vec4 r0 = flowSample(tRipple, gAlong, gAcross, spd,        0.55, 2.4, 1.35, 0.0);
           vec4 r1 = flowSample(tRipple, gAlong, gAcross, spd * 0.62, 1.90, 1.5, 0.83, 0.37);
+          /* A third band for the stream only, at a scale set by the width of
+           * the channel rather than by the width of a lake. The first two are
+           * a wave train two and a half metres long; a brook two metres across
+           * has nothing that big in it, and with only those two the surface
+           * came out smooth enough to be a varnish. The cross-flow stretch is
+           * dropped to 1.1 because in a narrow channel the banks are what set
+           * the wavelength, not the current. */
+          vec4 r2 = flowSample(tRipple, gAlong, gAcross, spd * 1.28, 4.30, 1.1, 1.70, 0.71);
           vec3 nr = normalize(vec3(
-            (r0.x - 0.5) * 2.0 + (r1.x - 0.5) * 1.1,
+            (r0.x - 0.5) * 2.0 + (r1.x - 0.5) * 1.1 + (r2.x - 0.5) * 1.5 * gStream,
             1.0,
-            (r0.y - 0.5) * 2.0 + (r1.y - 0.5) * 1.1));
+            (r0.y - 0.5) * 2.0 + (r1.y - 0.5) * 1.1 + (r2.y - 0.5) * 1.5 * gStream));
 
           /* Amplitude follows depth. A ripple needs water under it: a wave
            * train running up onto a gravel bar and over the top of it is one
@@ -448,7 +625,8 @@ export class Water {
           gFlat = 1.0 / (1.0 + length(vViewPosition) * 0.022);
           gNormalW = normalize(mix(vec3(0.0, 1.0, 0.0), nr,
                      gFlat * sstep(0.0, 0.35, gWaterDepth)
-                           * (0.45 + 0.55 * min(1.0, spd))));
+                           * (0.45 + 0.55 * min(1.0, spd))
+                           * (1.0 + 0.55 * gStream)));
           gRip = r0.w;
 
           /* Foam, in three parts, because it collects for three reasons.
@@ -488,7 +666,30 @@ export class Water {
           float foam = clamp(max(carried, shore) * (0.62 + 0.38 * fmFine.y), 0.0, 1.0);
           // Directly under the fall it is not foam but aerated water, and
           // that has to go nearly opaque or the plunge point is a hole.
-          foam = max(foam, sstep(0.80, 0.95, vAgitW));
+          /* The basin only. It is a description of an eighteen-metre plunge, and
+           * the brook's own shoals now reach the same agitation as that — so left
+           * ungated it put an opaque white patch over every gravel bar in the
+           * stream, which is a snowdrift. What a bar deserves is the carried term
+           * above, which is broken up by the foam map and lets the cobbles show
+           * between the bubbles. */
+          foam = max(foam, sstep(0.80, 0.95, vAgitW) * (1.0 - gStream));
+          /* Broken water where the bed comes up through the surface, which is
+           * the term the brook was missing and the one the eye uses to decide a
+           * channel has water in it at all.
+           *
+           * A stream is legible not from its colour — under this canopy it has
+           * almost none — but from the white collar behind every stone that
+           * nearly breaks the surface. The carried term above cannot supply it:
+           * it is driven by agitation alone, and agitation over a shoal is about
+           * 0.6 here, which squares to a third and then has a threshold applied
+           * to it. Requiring shallow *and* agitated instead selects exactly the
+           * few square metres immediately around each emergent block, and the
+           * fine map breaks the patch up so it reads as tumbling rather than as
+           * a painted ring. */
+          float rock = sstep(0.10, 0.015, gWaterDepth)
+                     * sstep(0.34, 0.70, vAgitW)
+                     * sstep(0.46, 0.82, fmFine.z + 0.30 * fm.y);
+          foam = max(foam, rock * 0.88);
 
           /* The body colour is dark and slightly blue-green and it stays
            * dark. The instinct when water looks wrong is to brighten it, and
@@ -500,15 +701,60 @@ export class Water {
           /* Absorption with depth. Exponential, because that is what it is,
            * and with a short length scale — a metre and a half of tannic
            * forest water is already essentially black. */
+          /* And the stream's length scale is nearly three times the basin's,
+           * which is the measurement that turned out to be under the whole of
+           * "the brook does not read as water".
+           *
+           * The reach the walk passes is backwater: the trail tread there is
+           * seventy-five centimetres above pool level, so the surface has no
+           * fall left to spend and brook.js pins it at the basin's height for
+           * the last sixty metres while the cut floor keeps descending. The
+           * water over it is therefore 65 to 80 cm deep rather than the 30 the
+           * profile authors, and at the basin's absorption 75 cm is opaque and
+           * black. Every shallow-water cue in this material then switches off at
+           * once — the bed stops showing through, the shoal foam never opens,
+           * the waterline scum never opens — and what is left is a dark matte
+           * film, which is exactly how it read.
+           *
+           * The fix is not to fake the depth, it is that the two bodies of water
+           * genuinely have different optics. A plunge basin is three and a half
+           * metres of still tannic water over dark rock. A brook is a hand's
+           * depth of it, renewed every few seconds, running over cobble: you can
+           * see every stone in the bottom of one. Same expression, honest
+           * coefficient.
+           */
           vec3 body = mix(uShallow, uDeep,
-                          1.0 - exp(-max(0.0, gWaterDepth) * 1.15));
+                          1.0 - exp(-max(0.0, gWaterDepth)
+                                    * mix(1.15, 0.42, gStream)));
           diffuseColor.rgb = mix(body, uFoamCol, foam);
 
           /* Alpha from depth, so the shallows are genuinely see-through and
            * the bed under them is the terrain's own wet gravel rather than a
            * painted approximation of it. */
-          float opa = 1.0 - exp(-max(0.0, gWaterDepth) * 1.9);
+          float opa = 1.0 - exp(-max(0.0, gWaterDepth) * mix(1.9, 0.80, gStream));
           opa = mix(opa, 1.0, foam * 0.94);
+          /* A floor on the film for the stream, and it is the difference
+           * between a surface and a stain. The depth curve is right for a
+           * basin, where the shallows are a metre-wide fringe nobody looks at;
+           * a brook is *all* fringe, so the whole of it came back at a third of
+           * a unit of alpha and what the eye read was the bed with a faint
+           * grey wash over it. Thirty per cent is enough to carry a highlight
+           * and still let the cobbles through. */
+          /* Raised to a half, because a third was not. Measured off the
+           * cross-channel frame: at 0.32 over a bed the wetness field has
+           * already taken to near-black, the composite is 68 per cent black
+           * cobble and the film contributes almost nothing the eye can find —
+           * which is the "dark matte gravel" reading exactly. A half is still
+           * transparent enough that the stones show through and read as a bed
+           * rather than as a painted bottom, and it is enough film to carry
+           * the reflection below. */
+          /* And back down to 0.38 now that the absorption above is honest. The
+           * half was propping up a curve that had already gone opaque by 40 cm,
+           * so it was doing nothing at all over most of the channel and hiding
+           * the bed in the shallows, which is the one place the bed is the whole
+           * point. The floor's only job is that the last few centimetres of
+           * fringe still carry a highlight. */
+          opa = max(opa, 0.38 * gStream * sstep(0.015, 0.10, gWaterDepth));
 
           // Grazing angles. A water surface seen nearly edge-on reflects
           // almost everything and transmits almost nothing, and this is most
@@ -551,8 +797,31 @@ export class Water {
            * normal is what decides which of those a given fragment gets, the
            * reflection breaks up into the moving mottle a real pool has —
            * darks and brights interleaved — rather than a wash. */
-          vec3 rdir = reflect(normalize(vWorldW - cameraPosition), gNormalW);
-          vec3 refl = mix(uBankRefl, uSkyRefl, sstep(0.015, 0.34, rdir.y));
+          vec3 vdir = normalize(vWorldW - cameraPosition);
+          vec3 rdir = reflect(vdir, gNormalW);
+          /* 0.30 rather than 0.34, which is a small move, and the reason it is
+           * small is worth recording because the first attempt at this finding
+           * was a large one and it was wrong.
+           *
+           * The complaint is that the pool "returns nothing" at two degrees. The
+           * first fix pulled this ceiling down to 0.16 so that the ripple could
+           * reach the bright end of the ramp at grazing incidence, and it did —
+           * and it also saturated the term to one over the *whole* pool at every
+           * angle above about six degrees, because rdir.y there is already past
+           * the ceiling before the ripple touches it. The result was a flat pale
+           * olive sheet with the canopy's leaf shadows printed on it, brighter
+           * than the stone around it: the exact failure this material has been
+           * dragged back from twice, arrived at from a third direction.
+           *
+           * The geometry is not negotiable. From two degrees off the surface the
+           * reflected ray leaves at two degrees, and what lies two degrees above
+           * the horizon on the far side of a plunge basin is the far bank and a
+           * thirty-metre cliff. It is *not* the canopy gap, which is eighty
+           * metres up and needs a bounce forty degrees steep to reach. So the
+           * honest answer at grazing is dark, and the ramp's job is only to keep
+           * the ripple's variance alive without letting the average run away. */
+          float sky = sstep(0.02, 0.30, rdir.y);
+          vec3 refl = mix(uBankRefl, uSkyRefl, sky);
           /* And it is switched off where the water is moving fast, which is
            * the correction for the lip.
            *
@@ -565,8 +834,60 @@ export class Water {
            * as a pale cream opaque slab *brighter* than the sheet below it,
            * inverting the dark-glassy-tongue reading it exists to produce. */
           float still = 1.0 - min(1.0, gWaterSpd * 0.42);
+          gStill = still;
+          gFres = fres;
+          /* Eight tenths for the pool, up from seven. At grazing incidence a
+           * dielectric reflects essentially all of what it sees and transmits
+           * essentially none of it; leaving nearly a third of the body colour
+           * showing through is what kept the near-mirror looking like a tinted
+           * sheet with a reflection painted faintly over it. */
+          /* Stood down where the reflection is real. This mix and the flick
+           * below are both stand-ins for an image, and once render/mirror.js
+           * is supplying one they are counting the same light twice: the
+           * symptom is a pool whose reflection is correct in structure and a
+           * third too bright, which is worse than either version alone. What
+           * is deliberately *left* is a fifth of the term, because it is also
+           * doing a second job the mirror cannot — mixing toward a near-black
+           * bank colour is what keeps the water from going transparent at
+           * grazing incidence, and that part is not double counted. */
           diffuseColor.rgb = mix(diffuseColor.rgb, refl,
-                                 fres * 0.72 * (1.0 - foam) * still);
+                                 fres * mix(0.80, 0.34, gStream)
+                                      * (1.0 - foam) * still
+                                      * (1.0 - 0.80 * gMirror));
+
+          /* The glints, and this is where the bright half of the reflection has
+           * to come from — for the pool at grazing incidence *and* for the brook,
+           * for the same reason and by the same term.
+           *
+           * Neither of them can get it from the Fresnel mix above. On the pool at
+           * two degrees the mix is strong but everything it can reach is dark, as
+           * the note above explains. On the brook the opposite holds: a walker
+           * looks *down into* a two-metre gully at thirty or forty degrees, where
+           * a water surface reflects three per cent, so fres to the fourth is
+           * 0.003 and the whole reflection is arithmetically absent however its
+           * colours are graded. Three passes of pushing those colours apart moved
+           * nothing, because none of them were ever reaching the frame.
+           *
+           * What both surfaces actually show is not a mirror image, it is
+           * *specks*. The canopy gap is a hundred or more times brighter than
+           * the shaded bank, so even a three per cent reflection of it is worth
+           * more than everything else the surface returns — but only off the
+           * facets that happen to be pointed at it. So the term to write is not
+           * a Fresnel ramp, it is a threshold on how far the ripple has lifted
+           * the reflected ray *above where flat water would have sent it*.
+           *
+           * Written that way it is independent of the viewing angle, which is
+           * what makes it work on a lake at two degrees and a brook at forty
+           * without tuning. It is also sparse by construction — the lift is zero
+           * on flat water by definition and only the steeper facets clear the
+           * threshold — so it cannot degenerate into the pale wash that every
+           * other attempt at this became. The water between the specks keeps the
+           * dark bank, which is the contrast that reads as a moving surface. */
+          float lift = max(0.0, rdir.y + vdir.y);
+          float flick = sstep(0.10, 0.26, lift);
+          diffuseColor.rgb = mix(diffuseColor.rgb, uSkyRefl * 1.30,
+                                 flick * mix(0.34, 0.46, gStream) * (1.0 - foam)
+                                       * (1.0 - 0.55 * gMirror));
 
           // The waterline itself. Feathered over the last few centimetres so
           // the edge wanders with the ripple instead of cutting the bed on a
@@ -621,7 +942,24 @@ export class Water {
          * the latter, and it is the last chunk before the terms are summed. */
         .replace('#include <aomap_fragment>', /* glsl */ `
           #include <aomap_fragment>
-          reflectedLight.directSpecular *= 0.30;
+          /* The scaling is for the basin. A stream keeps its sun glint: where a
+           * shaft crosses a brook the surface throws back a broken line of
+           * near-white sparks, and in a forest interior that is the loudest
+           * single statement that a thing is water — louder than colour, than
+           * transparency and than the ripple itself. Crushed to 0.30 along with
+           * the pool it had none, and read as damp dirt. */
+          /* 1.05 rather than 1.75, and the difference is sparks against a sheet.
+           *
+           * Written out on its own this term measured 0.87 of a unit across the
+           * whole width of the channel wherever a sun shaft crosses it — not a
+           * broken line of glints but a continuous pale slab, because at seven
+           * metres the shaft is wider than the stream and the specular lobe on a
+           * roughness-0.25 surface is broad enough to keep every fragment inside
+           * it. Gain cannot make a highlight sparse; only the normal can. So the
+           * gain comes back to about unity, where the sun is still the brightest
+           * thing on the water, and the breaking-up is left to the third ripple
+           * band and to the foam. */
+          reflectedLight.directSpecular *= mix(0.30, 1.05, gStream);
           /* The reflection is of the sky *through the roof*, not of an open
            * sky, and this is the line that makes the pool read as water
            * rather than as a hole cut in the clearing floor.
@@ -636,7 +974,116 @@ export class Water {
            * costs one multiply and puts the leaf pattern into the reflection,
            * which is both what a real pool looks like and the cheapest
            * possible substitute for a screen-space reflection. */
-          reflectedLight.indirectSpecular *= 0.20 * mix(0.35, 1.0, gCanopyOcc);
+          /* The image-based term is raised far less than the direct one, and the
+           * asymmetry is the whole lesson of this material. Three's indirect
+           * specular is a uniform sky dome with no ripple structure in it, so
+           * turning it up does not add sparkle — it adds a flat pale wash, which
+           * is the failure the notes above describe from the pool's side. The
+           * sun glint is directional and rides the ripple, so it breaks into
+           * moving highlights instead. Raising one and not the other is the
+           * difference between water and a sheet of plastic. */
+        /* The stream's share is raised to 0.72 all the same, and the asymmetry
+         * argument above is exactly why that is safe here and would not be on
+         * the pool. The failure mode of this term is a flat pale wash over a
+         * large area at grazing incidence; the brook is neither large nor at
+         * grazing incidence, and its ripple normal is 1.55 times the pool's, so
+         * what a raised dome term does to it is vary the Fresnel across the
+         * ripple and break into sheen rather than flatten. Combined with the
+         * material's own envMapIntensity above this is about six times the
+         * reflected sky the brook had, and it is the difference between a
+         * channel with a surface in it and a slightly lighter stripe of dirt. */
+        /* 0.30, not 0.72, and this is the same argument arriving at the opposite
+         * answer once it was measured instead of reasoned about.
+         *
+         * The claim above is that the failure mode of this term needs a large
+         * area at grazing incidence and the brook is neither. The brook the
+         * *player* sees is both. A walker on the trail is six to twelve metres
+         * from the channel and about twenty degrees above its surface, not forty
+         * looking down into it, and over that reach the stream fills a third of
+         * the lower frame. Written out on its own the term came back as a
+         * featureless pale tan slab — ten values of spread between its tenth and
+         * ninetieth percentile over the whole surface — so all it was
+         * contributing was a floor under everything else, and a floor is the one
+         * thing water must not have. What is left is still three and a half
+         * times the pool's share, which is enough to keep the surface from going
+         * to pure black in shade. */
+        /* And crushed almost out of existence on the pool once the mirror is
+         * running, which is the whole of the fix to the flat pale sheet.
+         *
+         * It is worth being precise about what that sheet was, because it
+         * survived four passes of being tuned. It was never the albedo, never
+         * the foam and never the environment map's own image: it is three's
+         * multi-scattering estimate for the indirect specular, which is driven
+         * by the *ambient irradiance* rather than by the environment radiance,
+         * so no material property reaches it and envMapIntensity does
+         * nothing to it at all. On a dielectric this smooth, seen at two to ten
+         * degrees over twenty-five metres, it integrates to a constant — and it
+         * was the dominant term in the pool by a wide margin. A capture with
+         * the water hidden settled it: the pale olive plane with leaf shadows
+         * printed on it was the surface, and this line was almost all of it.
+         *
+         * It could not simply be removed before, because it was also the only
+         * reflection the pool had. Now that there is a real one, it can be. */
+          reflectedLight.indirectSpecular *= gEnvFix
+                                           * mix(mix(0.20, 0.05, gMirror), 0.30, gStream)
+                                           * mix(0.35, 1.0, gCanopyOcc);
+          /* And tinted, for the stream only, which is the correction for the
+           * cyan the raise above brought with it.
+           *
+           * three hands this surface an unoccluded sky dome, and a sky dome is
+           * blue. On the pool the term is small enough not to matter; on the
+           * brook it is now the dominant reflection, so the channel came back a
+           * slate blue-grey — measurably cooler than everything around it
+           * (r-b = -10 against +27 for the litter on its own banks) and reading
+           * as wet asphalt. What a stream in a closed forest actually reflects
+           * is leaves: a hundred per cent canopy, a few per cent of sky through
+           * gaps in it. Warming the term is a two-word stand-in for that and it
+           * keeps the sparkle the raise bought. */
+          reflectedLight.indirectSpecular *=
+            mix(vec3(1.0), vec3(1.26, 1.06, 0.58), gStream);
+        `)
+        /* The reflection itself, added as light and not as albedo.
+         *
+         * Every previous version of this reflection was mixed into
+         * `diffuseColor` instead, for a defensible reason — a colour mixed into
+         * the albedo is bounded by the shading and cannot run away the way an
+         * added term can. It is also why none of them read as a mirror. A
+         * reflection multiplied by the local irradiance is a reflection that
+         * goes dark wherever the water is in shade, and this pool is in shade
+         * over most of its area: what the eye then sees is a picture of the far
+         * bank with the canopy's shadow pattern lying across it, which is not
+         * how a mirror behaves. Reflected light has already been through its own
+         * shading on the way to the surface; the only thing left to do to it is
+         * scale it by Fresnel.
+         *
+         * Placed before `tonemapping_fragment` so that `fog_fragment`, which
+         * three runs afterwards, hazes the reflection along with everything else
+         * in the fragment. A crisp reflection in a hazed frame is one of the
+         * loudest tells a planar mirror has, and getting it for free by
+         * injecting one chunk earlier is the whole reason for the position.
+         *
+         * The alpha blend does the rest of the physics without being asked: the
+         * surface is only opaque where it is at grazing incidence, which is
+         * exactly where the reflection is strong, so a shallow transparent
+         * shoal cannot acquire a mirror it has no business having. */
+        .replace('#include <tonemapping_fragment>', /* glsl */ `
+          if (gMirror > 0.002) {
+            float w = gMirror * gFres * gStill * (1.0 - gFoam);
+            /* Displaced by the ripple, in screen space, which is the one
+             * approximation in this whole path. Doing it properly means
+             * intersecting the perturbed ray with the reflected scene, and the
+             * cheap version is indistinguishable at a metre of wave height
+             * because the error is second order in the slope. Faded with
+             * distance by the same term that flattens the ripple normal, so
+             * the far half of the basin does not shimmer at a pixel scale. */
+            vec2 muv = vMirrorP.xy / max(1e-4, vMirrorP.w)
+                     + gNormalW.xz * 0.070 * gFlat;
+            vec3 mcol = texture2D(tMirror, clamp(muv, vec2(0.002), vec2(0.998))).rgb;
+            gMirrorCol = mcol;
+            gMirrorW = w;
+            gl_FragColor.rgb += mcol * (w * 0.95);
+          }
+          #include <tonemapping_fragment>
         `)
         /* Debug taps, the same way the terrain exposes its splat channels.
          * "The pool is white" has at least four candidate causes — foam
@@ -660,6 +1107,16 @@ export class Water {
             if (uWaterDbg > 6.5) gl_FragColor = vec4(reflectedLight.directSpecular, 1.0);
             if (uWaterDbg > 7.5) gl_FragColor = vec4(reflectedLight.indirectSpecular, 1.0);
             if (uWaterDbg > 8.5) gl_FragColor = vec4(reflectedLight.indirectDiffuse, 1.0);
+            // The ripple normal itself, remapped. "The surface looks flat" has
+            // two candidate causes — no normal, or a normal nothing is lighting
+            // — and they need separating before either can be worked on.
+            if (uWaterDbg > 9.5) gl_FragColor = vec4(gNormalW * 0.5 + 0.5, 1.0);
+            // And the reflection, as its weight and as its image. "The mirror
+            // is not appearing here" has two candidate causes and they need
+            // separating: either the term is zero, or it is sampling something
+            // that looks like what it replaced.
+            if (uWaterDbg > 10.5) gl_FragColor = vec4(vec3(gMirrorW), 1.0);
+            if (uWaterDbg > 11.5) gl_FragColor = vec4(gMirrorCol, 1.0);
           }
         `)
         // Nothing left to do here but install what the colour block worked
@@ -674,10 +1131,14 @@ export class Water {
       // chunks never touch these names.
       sh.fragmentShader = 'float gWaterDepth; float gWaterSpd; float gRip;\n'
         + 'float gAlong; float gAcross; float gFoam = 0.0; float gFlat = 1.0;\n'
+        + 'float gMirror = 0.0; float gFres = 0.0; float gStill = 1.0;\n'
+        + 'float gMirrorW = 0.0; vec3 gMirrorCol = vec3(0.0);\n'
+        + 'float gStream = 0.0; float gEnvFix = 1.0;\n'
+        + 'uniform float uStream;\n'
         + 'vec3 gNormalW = vec3(0.0, 1.0, 0.0);\n' + sh.fragmentShader;
     };
     m.customProgramCacheKey = () => 'water-surface';
-    this.surfaceMat = m;
+    return m;
   }
 
   _surfaceUniforms() {
@@ -723,6 +1184,11 @@ export class Water {
          * lightest thing in the shot, and stops it clipping in the light. */
         uFoamCol: { value: new THREE.Color(0xaab5b2) },
         uWaterDbg: { value: 0 },
+        tMirror: { value: null },
+        uMirror: { value: 0 },
+        uMirrorY: { value: POOL_Y },
+        uPoolC: { value: new THREE.Vector2(POOL.x, POOL.z) },
+        uPoolR: { value: POOL.r },
       };
     }
     return this._surfUni;
@@ -795,20 +1261,93 @@ export class Water {
     const B = this.terrain.brook;
     const st = B.st.slice(B.i0, B.i1 + 1);
     const n = st.length - 1;
-    const M = 5;
+    /* Seven columns rather than five, because the mesh now runs up both banks
+     * (see MESH_MARGIN in brook.js) and the two outer columns are spent on
+     * ground the depth test is going to discard: at five, the remaining three
+     * had to carry the whole of the water and the ripple normal was being
+     * interpolated across a metre. */
+    const M = 7;
+    const half = (s) => B.meshHalf(s);
     const g = this._grid(M, n, (i, j) => {
       const s = st[j];
       const u = (i / M) * 2 - 1;
-      return [s.cx + s.tz * u * s.half, s.y, s.cz - s.tx * u * s.half];
+      return [s.cx + s.tz * u * half(s), s.y, s.cz - s.tx * u * half(s)];
     }, (i, j) => {
       const s = st[j];
+      const u = (i / M) * 2 - 1;
+      const wx = s.cx + s.tz * u * half(s), wz = s.cz - s.tx * u * half(s);
       /* Speed and foam are the station's own, which after the step-pool
        * quantisation means the glides run slow and clear and each 22 cm drop
        * runs fast and white. A brook whose whole length is at one speed is
        * the same failure as a curtain with one texture speed. */
-      return { flow: [s.tx * s.speed, s.tz * s.speed], agit: s.agit };
+      /* Plus what the bed does to it, which the station profile cannot know.
+       *
+       * The profile is one number per cross-section, so it has grade and
+       * nothing else, and over the last sixty metres before the basin it has no
+       * grade either: the clearing floor sits barely half a metre above the
+       * pool, so the water surface down there is flat by hydrology and no
+       * amount of authoring can put a step in it. That reach is also the only
+       * part of the brook the player ever walks beside, so "white water only
+       * where there is a drop" meant no white water anywhere it counts.
+       *
+       * What a flat reach does have is a rough bed — cobbles, and the ruins'
+       * own fallen blocks standing in the channel. Water running over a rock
+       * that nearly breaks the surface breaks white behind it whatever the
+       * grade is, and the depth over each vertex is already known here because
+       * the bed is sampled from the terrain the channel was cut into. So the
+       * shoals get the foam, which puts it exactly where an obstacle is rather
+       * than in a band, and it costs one height fetch per vertex at build time.
+       */
+      const d = s.y - this.terrain.height(wx, wz);
+      /* Eleven centimetres, not twenty-four, and it matters because of what the
+       * brook's own depth is. A glide here is 19 to 37 cm deep by construction,
+       * so a shoal test that opens at 24 cm selects *most of the stream* — and
+       * then feeds it into an agitation term that saturates the material's foam
+       * threshold. The channel came back white from bank to bank. A shoal is
+       * water you could see the tops of the stones through: a hand's depth, not
+       * a knee's. */
+      /* Midstream only, and the gate is what separates a stone in the current
+       * from the margin.
+       *
+       * Both are shallow, so depth alone cannot tell them apart — and the
+       * channel here is asymmetric, with a broad ankle-deep shelf along one
+       * bank for most of the visible reach. Keyed on depth alone the shoal term
+       * selected that whole shelf and the foam channel came back as a white
+       * ribbon twenty metres long down one side of the brook, which is a beach,
+       * not a riffle. The margin already has its own much weaker scum term. */
+      const shoal = smoothstep(0.14, 0.03, d) * smoothstep(0.72, 0.42, Math.abs(u));
+      /* And they speed it up, for the same reason and by the same continuity
+       * argument the narrows do: the discharge is fixed, so where the section
+       * shrinks the water has to go faster. It is the moving foam that reads as
+       * speed, so this is most of what stops the flat reach looking like a
+       * canal. */
+      const sp = s.speed * (1.0 + 0.9 * shoal) * Math.min(1.7, 1.25 / s.half);
+      /* The shoal sits on one bank, so the white it makes does too.
+       *
+       * The station cannot apply that itself — it is one number for a whole
+       * cross-section, and one number painted across a seven-column mesh is a
+       * stripe from bank to bank. Measured foam coverage over the reach the walk
+       * passes was a third of a unit at every column, which is why sixty metres
+       * of channel came back as a pale ribbon rather than as water with riffles
+       * in it. brook.js publishes which side the bar is on; this is the only
+       * place the lateral coordinate exists to spend it.
+       *
+       * Faded out at the very edge as well, because the margin has its own much
+       * weaker scum term and two whitening terms meeting on the waterline is a
+       * kerb.
+       */
+      const barGate = smoothstep(-0.30, 0.42, u * s.barSide)
+                    * smoothstep(0.96, 0.74, Math.abs(u));
+      return {
+        flow: [s.tx * sp, s.tz * sp],
+        /* No blanket floor. The station already carries one, and adding a second
+         * constant here is what made the three foam terms sum to a white
+         * ribbon — this one only has the right to raise the white where the bed
+         * is actually breaking the surface. */
+        agit: Math.max(s.agitFlow, s.agitBar * barGate, 0.78 * shoal),
+      };
     });
-    this.brookMesh = new THREE.Mesh(g, this.surfaceMat);
+    this.brookMesh = new THREE.Mesh(g, this.streamMat);
     this.brookMesh.name = 'brook';
     return this.brookMesh;
   }
@@ -857,6 +1396,13 @@ export class Water {
         bed: spillFloor(z),
       };
     });
+    /* The still-water material, not the stream one, and the difference is the
+     * specular gain. The tongue is a metre and a half of water accelerating at
+     * six metres a second over rock: its surface is corrugated far below the
+     * scale this shader resolves, so physically it scatters rather than
+     * reflecting, and the reading it has to produce is dark and glassy. Given
+     * the stream's glint budget it came back as a pale slab brighter than the
+     * curtain below it, which is the exact inversion the lip was fixed for. */
     this.chuteMesh = new THREE.Mesh(g, this.surfaceMat);
     this.chuteMesh.name = 'chute';
     return this.chuteMesh;
@@ -969,16 +1515,37 @@ export class Water {
    * so the join is not visible.
    */
   _buildBoil() {
-    // Dense enough to carry the churn's relief. Still one draw call, and the
-    // triangle count is noise next to the two and a half million in frame.
-    const NR = 30, NA = 96, R = 7.4;
+    /* Dense enough to carry the churn's relief. Still one draw call, and the
+     * triangle count is noise next to the two and a half million in frame.
+     *
+     * The angular count is what it is because of where the camera stands. The
+     * two framings this feature is judged on put the eye 16 cm and 36 cm above
+     * the alcove's surface, so the boil is always seen from within its own
+     * plane — and a displaced mesh viewed along its plane draws its own
+     * tessellation as the silhouette. At 96 segments that was a row of straight
+     * facets a hand's width each, which is the "faceted churn" reading; the
+     * relief is not the problem at that point, the polygon count is. At 160 the
+     * same silhouette is fine enough to read as froth. 18k triangles against
+     * 2.4M in frame, and it measured free.
+     */
+    const NR = 56, NA = 160, R = 7.4;
     const W = NA + 1, H = NR + 1;
     const P = new Float32Array(W * H * 3);
     const pol = new Float32Array(W * H * 2);
     for (let j = 0; j < H; j++) {
-      // Squared radial spacing: the dome and the first two wave crests are
-      // inside three metres and that is where the vertices are needed.
-      const r = R * Math.pow(j / NR, 1.7);
+      /* Nearly uniform radial spacing, and the exponent is why the churn was
+       * faceted.
+       *
+       * At 1.7 the rings piled up against the centre — the first was 19 mm out
+       * and the last four spanned two and a half metres. That is the wrong way
+       * round for this surface: the relief is smooth and broad at the middle
+       * and its *steepest* part is the shoulder of the mound at two to three
+       * metres, which is exactly where the spacing had grown to half a metre.
+       * A height field sampled at half a metre where it changes by a third of a
+       * metre draws flat plates with straight silhouette edges, which is what
+       * the frames show. 1.15 puts the samples where the gradient is.
+       */
+      const r = R * Math.pow(j / NR, 1.15);
       for (let i = 0; i < W; i++) {
         const a = (i / NA) * Math.PI * 2;
         const k = j * W + i;
@@ -1009,10 +1576,17 @@ export class Water {
     g.computeBoundingSphere();
     g.boundingSphere.radius += 2;
 
+    /* Single-sided, which the previous version was not and which is half of why
+     * the churn read as folded paper. There is no view of a plunge pool from
+     * which the *underside* of its own boil is something the eye should be
+     * shown; drawing it two-sided with depth writes off meant every fold in the
+     * surface presented its back face through its front one as a thin white
+     * blade with a hard silhouette. Front faces only, and the relief is low
+     * enough now that no trough needs the back face to close it. */
     const m = new THREE.MeshStandardMaterial({
       color: 0xffffff, roughness: 0.4, metalness: 0.0,
-      transparent: true, depthWrite: false, side: THREE.DoubleSide,
-      envMapIntensity: 1.0,
+      transparent: true, depthWrite: false, side: THREE.FrontSide,
+      envMapIntensity: 0.7,
     });
 
     /* The surface, written once and used three times — for the height, for
@@ -1028,76 +1602,93 @@ export class Water {
         float k = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
         return k * k * (3.0 - 2.0 * k);
       }
-      float boilH(float r, float a, float t, float n, float n2){
-        /* Every radial term is detuned, and the detuning now comes from a
-         * noise field rather than from a handful of sinusoids in the angle.
+      float boilH(float r, float a, float t){
+        /* Every term is a function of *position*, and that is the whole of the
+         * faceting fix rather than a refactor.
          *
-         * Three harmonics in a periodic variable are still periodic, and the
-         * eye finds that instantly: the crests came out as evenly spaced
-         * circles with a gentle lobing on them, which the critique read as a
-         * CD. A real plunge pool's wave field is irregular because the jet
-         * wanders and the surface it travels over is already disturbed, so the
-         * phase has to be perturbed by something with no period at all. The
-         * noise is a texture fetch in the vertex shader, which is where the
-         * displacement is anyway. */
-        /* Six harmonics on mutually irrational-ish frequencies rather than a
-         * noise fetch.
+         * The previous version detuned the wave train with harmonics in the
+         * bearing — sin(a * 3.7), sin(a * 5.3), sin(a * (0.9 + r * 0.8)). A
+         * non-integer multiple of the bearing is *discontinuous where the
+         * bearing wraps*: at a = 0 the term is sin(0) and one vertex round the
+         * disc, at a = 2*pi, it is sin(7.4*pi), and the two are not equal. So
+         * the height field had a step in it along the whole +x radius, the
+         * analytic normal across that step pointed sideways, and what came out
+         * was a hard crease with flat plates either side of it. Chasing it as
+         * a resolution problem is why two passes of re-tuning the exponent and
+         * the ring count did not shift it: no amount of sampling represents a
+         * discontinuity.
          *
-         * The noise version of this shattered the surface, and the reason is
-         * worth keeping: the foam map is a near-binary bubble field, so using it
-         * to phase-modulate a wave train makes the *height field itself*
-         * discontinuous — and a discontinuous height field with analytic normals
-         * is a heap of glass shards, which is precisely what came out. A sum of
-         * harmonics is smooth by construction. Three angular terms whose
-         * frequencies share no small common multiple beat against each other
-         * over a period far longer than the disc, which is enough to break the
-         * concentric-circle reading without ever leaving the space the mesh can
-         * represent. */
-        float wob = 0.46 * sin(a * 2.0 + t * 0.61)
-                  + 0.31 * sin(a * 3.7 - t * 0.37 + 1.9)
-                  + 0.22 * sin(a * 5.3 + t * 0.23 + 4.1);
-        float amp = 0.52 + 0.30 * sin(a * 1.7 - t * 0.44)
-                         + 0.22 * sin(a * 4.1 + t * 0.29 + 2.4);
-        /* Lower and broader than it was. A tall narrow dome under an opaque
-         * white disc is a snowdrift: a discrete rounded object sitting on the
-         * water with its own smooth silhouette, which is what the churn looked
-         * like once it was made opaque. What a boil actually presents is a
+         * Sampling the *world position* instead is continuous by construction —
+         * there is no seam to cross, because the field does not know the disc is
+         * parameterised in polar coordinates at all. It also fixes the second
+         * half of the same bug for free: a term in the bearing has ground
+         * wavelength 2*pi*r/k, which collapses to nothing at the pole and can
+         * never be meshed there, while a term in x and z has the same
+         * wavelength everywhere. And it is not periodic in the angle, so the
+         * concentric-CD reading the critique caught cannot come back either.
+         */
+        vec2 p = vec2(cos(a), sin(a)) * r;
+        float wob = sin(p.x * 0.61 + 1.7) * cos(p.y * 0.53 - 0.9)
+                  + 0.62 * sin(p.x * 0.29 - p.y * 0.37 + 2.4);
+        float amp = 0.62 + 0.34 * sin(p.x * 0.44 - p.y * 0.31 + 0.8);
+        /* Half the relief it had, and the reason is self-occlusion rather than
+         * taste.
+         *
+         * At 1.25 m of total amplitude over a mound about three metres across,
+         * the surface has places where it is steeper than 45 degrees — and this
+         * mesh is drawn two-sided with no depth write, from a camera two metres
+         * above the water. A steep two-sided surface seen from near its own
+         * plane shows its underside through its topside, and every fold becomes
+         * a thin white blade with a hard silhouette edge. The isolated frame of
+         * it read as a folded paper bird. A boil is not a tall object: it is a
          * *broken* surface barely raised above the pool, so the height comes
-         * down and most of what is left is the lumps below. */
-        float dome = 0.62 * exp(-r * r / 7.0);
-        /* Lumps from the noise field rather than from harmonics in the angle,
-         * and the reason is spatial frequency near the pole.
-         *
-         * A term in sin(k*a) has a wavelength of 2*pi*r/k on the ground, so it
-         * gets arbitrarily fine as r goes to zero — and a mesh with a fixed
-         * number of segments cannot represent it there. What came out was a
-         * cluster of sharp triangular facets in the middle of the churn,
-         * reading as crumpled paper. Noise sampled in world xz has the same
-         * wavelength everywhere, so the mesh can carry all of it. */
-        /* And the crown, at a spatial frequency that is bounded near the pole:
-         * the angular terms are divided by the radius they sit at, so their
-         * wavelength on the ground stays roughly constant instead of collapsing
-         * to zero in the middle of the churn. That collapse is what faceted the
-         * first version of this. */
-        float ar = a * min(4.0, 0.9 + r * 0.8);
-        float lump = 0.26 * exp(-r * r / 9.0)
-          * (sin(ar + t * 2.1 + r * 1.3) * sin(r * 1.7 - t * 2.6)
-           + 0.6 * sin(ar * 1.6 - t * 1.5) * cos(r * 2.3 - t * 3.1));
+         * down, the mesh goes single-sided, and the churn is carried by the foam
+         * coverage in the fragment shader where it cannot fold anything. */
+        float dome = 0.46 * exp(-r * r / 7.0);
+        /* The crown — the unstable top that makes a boil boil. Kept at a ground
+         * wavelength of roughly two metres, which the 16 cm mesh spacing at the
+         * shoulder carries with a dozen samples to spare. */
+        float crown = 0.115 * exp(-r * r / 10.0)
+          * (sin(p.x * 3.3 + p.y * 1.9 + t * 2.1)
+               * sin(p.y * 2.7 - p.x * 1.4 - t * 2.6)
+           + 0.55 * sin(p.x * 1.7 - p.y * 3.1 - t * 1.5));
+        /* A second octave at about an 80 cm wavelength, which is the finest
+         * relief this mesh can hold: at the shoulder the spacing is 10 cm
+         * across and 13 cm out, so 80 cm is six samples and still smooth.
+         * Without it the churn is a dune — one broad mound with a clean
+         * silhouette, which is the "reads as a solid object" note. Churn is a
+         * surface with something happening at every scale down to the bubble,
+         * and this is the last scale before the fragment shader takes over. */
+        crown += 0.045 * exp(-r * r / 12.0)
+          * sin(p.x * 7.7 - p.y * 3.4 + t * 3.7)
+          * sin(p.y * 6.9 + p.x * 2.8 - t * 4.3);
         /* Waves radiating out, and the phase has to be r - ct with c
          * positive or the rings travel inward, which reads as a drain. The
          * amplitude decays with radius twice over: once because a circular
          * wave spreads its energy round a growing circumference, and once
          * because it damps. */
-        float ring = 0.26 * amp * exp(-r * 0.26) / sqrt(1.0 + r)
-          * sin((r + wob) * 2.05 - t * 3.4);
-        ring += 0.11 * amp * exp(-r * 0.20) / sqrt(1.0 + r)
-          * sin((r - wob * 1.7) * 1.31 - t * 2.15 + a * 0.8);
-        float swell = 0.055 * sin(r * 0.7 - t * 1.35 + a * 1.5);
+        float ring = 0.15 * amp * exp(-r * 0.26) / sqrt(1.0 + r)
+          * sin((r + wob * 0.55) * 2.05 - t * 3.4);
+        ring += 0.065 * amp * exp(-r * 0.20) / sqrt(1.0 + r)
+          * sin((r - wob * 0.90) * 1.31 - t * 2.15);
+        float swell = 0.05 * sin(p.x * 0.70 - p.y * 0.40 - t * 1.35);
         /* And all of it goes to nothing before the mesh does. The disc has an
          * outline and the water does not, so anything still moving when the
          * rim arrives draws that outline for you — a raised elliptical table
          * edge sitting on an otherwise flat pool. */
-        return (dome + lump + ring + swell) * bfade(7.4, 3.2, r);
+        float h = (dome + crown + ring + swell) * bfade(7.4, 1.8, r);
+        /* Nothing dips below the pool, and this is the dark hole.
+         *
+         * The wave troughs and the negative half of the crown together reached
+         * about forty centimetres under the still-water plane. With depth writes
+         * off on every water surface, a depressed patch of this mesh is seen
+         * from a low camera *through* the pool as its own unlit underside — a
+         * dark trapezoid punched in the water directly beneath the churn, with
+         * straight edges where the surface crossed the plane. Compressing the
+         * troughs and lifting the whole sheet a few centimetres keeps the wave
+         * train legible while guaranteeing the churn is always the topmost
+         * water in its own footprint. */
+        return 0.055 + (h < 0.0 ? h * 0.22 : h);
       }
     `;
 
@@ -1108,48 +1699,29 @@ export class Water {
         // Held below the curtain's own white. The churn is lit by the same
         // skylight and is no brighter than the sheet feeding it; brighter and
         // it separates from the fall and reads as a foreign object.
-        uWhite: { value: new THREE.Color(0xaeb6b1) },
-        // Less green. The impact of a fall is grey-white water with air in it,
-        // and a teal base showing between the bubbles was most of why the
-        // footprint read as pond rather than as churn.
-        uDeep: { value: new THREE.Color(0x252b2a) },
-        uScatter: { value: new THREE.Color(0x1a2422) },
+        uWhite: { value: new THREE.Color(0xb5b2a4) },
+        /* Warmed toward the pool it sits in. Neutral grey plus a smooth white
+         * surface at low roughness reflects the cool sky and comes back
+         * steel-blue, which against an olive basin is a local palette break —
+         * the one thing in this scene that must never happen. */
+        uDeep: { value: new THREE.Color(0x2b2e26) },
+        /* And the shade floor is warm too. This was a dark teal, and a teal
+         * floor added to a neutral white under a cool sky is what actually put
+         * the ice into the frame: the churn came back blue-white against an
+         * olive basin and read as a snowdrift rather than as water. Nothing in
+         * this scene is lit by anything but filtered green-gold daylight. */
+        uScatter: { value: new THREE.Color(0x1e2119) },
       });
       sh.vertexShader = SURF + `
         attribute vec2 aPolar;
         uniform float uTime;
-        uniform sampler2D tFoam;
         varying vec2 vPolar;
         varying float vH;
-        // A slowly drifting scalar field, sampled where the vertex is rather
-        // than by radius, so it decorrelates the wave train from the polar
-        // frame that generates it.
-        float boilN(float r, float a){
-          vec2 p = vec2(cos(a), sin(a)) * r;
-          return texture2D(tFoam, p * 0.052 + vec2(0.13, 0.61)
-                                  + vec2(0.006, -0.011) * uTime).r;
-        }
-        // The churn itself: finer, and moving outward, because that is the
-        // direction the surface is travelling.
-        float boilN2(float r, float a){
-          vec2 p = vec2(cos(a), sin(a)) * r;
-          /* Coarse — about a six-metre feature, not a thirty-centimetre one.
-           * The foam map is near-binary at the texel level and sampling it at a
-           * fine scale puts detail below the mesh's own resolution into the
-           * displacement, which comes out as shattered glass rather than as
-           * churn. Relief has to stay inside what the triangles can express;
-           * everything finer belongs in the coverage term in the fragment
-           * shader, where it costs nothing and cannot fold the surface. */
-          return texture2D(tFoam, p * 0.038 - normalize(p + 1e-4) * uTime * 0.012
-                                  + vec2(0.71, 0.29)).g;
-        }
       ` + sh.vertexShader
         .replace('#include <begin_vertex>', /* glsl */ `
           #include <begin_vertex>
           vPolar = aPolar;
-          float r = aPolar.x, a = aPolar.y, t = uTime;
-          float n = boilN(r, a), n2 = boilN2(r, a);
-          float h = boilH(r, a, t, n, n2);
+          float h = boilH(aPolar.x, aPolar.y, uTime);
           vH = h;
           transformed.y += h;
         `)
@@ -1158,14 +1730,11 @@ export class Water {
           {
             float r = aPolar.x, a = aPolar.y, t = uTime;
             float e = 0.09;
-            float dr = (boilH(r + e, a, t, boilN(r + e, a), boilN2(r + e, a))
-                      - boilH(r - e, a, t, boilN(r - e, a), boilN2(r - e, a)))
-                       / (2.0 * e);
+            float dr = (boilH(r + e, a, t) - boilH(r - e, a, t)) / (2.0 * e);
             // Angular difference converted to a real one: an arc of da at
             // radius r is r*da long, and dividing by anything smaller than a
             // few centimetres at the pole gives a normal pointing at nothing.
-            float da = (boilH(r, a + e, t, boilN(r, a + e), boilN2(r, a + e))
-                      - boilH(r, a - e, t, boilN(r, a - e), boilN2(r, a - e)))
+            float da = (boilH(r, a + e, t) - boilH(r, a - e, t))
                        / (2.0 * e * max(0.35, r));
             vec3 tr = normalize(vec3(cos(a), dr, sin(a)));
             vec3 ta = normalize(vec3(-sin(a), da, cos(a)));
@@ -1194,8 +1763,36 @@ export class Water {
            * a metre across, and the clusters of bubbles inside them. */
           float adv = uTime * 0.85;
           vec2 dir = vec2(cos(a), sin(a));
-          vec4 f1 = texture2D(tFoam, (xz - dir * adv) * 0.115 + 0.5);
-          vec4 f2 = texture2D(tFoam, (xz - dir * adv * 1.7) * 0.34 + vec2(0.31, 0.77));
+          /* Sampled in a frame that is *stretched along the direction the water
+           * is going*, which is what turns a field of blobs into rafts.
+           *
+           * Foam on moving water is always longer than it is wide: it is a
+           * passive tracer being sheared by a velocity field, so it arrives as
+           * trains and streaks rather than as spots. An isotropic sample of a
+           * bubble map cannot express that however it is thresholded — it gives
+           * round clumps, and round clumps at uniform density are the speckle
+           * the critique read as grey dust. Three to one along the outward
+           * radial, and the rafts draw themselves out into tails as they go. */
+          /* And the *shapes* come from the map's coarse warped raft mask in .b,
+           * with the bubble-scale channel used only as sparkle inside them.
+           *
+           * Reading the shapes out of .g — the 54-to-96-cell bubble field — and
+           * then stretching it along the flow does not make rafts. It makes
+           * hair: a field whose features are already smaller than a hand,
+           * combed three to one, at constant density over a fifteen-metre disc.
+           * That is the "static hatched noise reading as fur" the critique named
+           * at the very start, arrived at from the opposite direction. .b is
+           * warped and thresholded at about six cells, so its features are
+           * metres across and survive being stretched.
+           *
+           * The anisotropy comes down with it. Just under two to one is enough
+           * for the rafts to lean outward and be read as travelling; three to
+           * one combs them whatever channel they came from. */
+          vec2 rc = xz - dir * adv;
+          vec2 ac = vec2(-dir.y, dir.x);
+          vec4 f1 = texture2D(tFoam, vec2(dot(rc, dir) * 0.075,
+                                          dot(rc, ac) * 0.135) + 0.5);
+          vec4 f2 = texture2D(tFoam, (xz - dir * adv * 1.7) * 0.20 + vec2(0.31, 0.77));
 
           /* Coverage. Total over the dome, then a ring that the waves carry
            * outward, then rags trailing off downstream — foam is memory, and
@@ -1213,34 +1810,123 @@ export class Water {
            * only once it is outside the churn, and the modulation by the map
            * has to be applied to the rafts and not to the core: multiplying the
            * core by a noise field is what turned it into speckle. */
-          float cov = sstep(5.2, 3.0, r);
+          /* The core, with a broken boundary. A solid disc is right — the jet
+           * makes foam faster than it can drift away, so the footprint really
+           * is saturated — but its *edge* must not be a circle, so the radius it
+           * is tested against is displaced by the map rather than being
+           * constant. */
+          /* Two displacement scales on the radius it is tested against, not
+           * one. A single one gives a circle with a wobble in it — the outline
+           * is still one closed smooth curve, which is what makes the churn read
+           * as a solid object with a soft edge. Adding a second scale three
+           * times finer lets the boundary reach *inward* in places as well as
+           * outward, so the core's edge has bays and headlands in it and the
+           * rafts outside it look like they came off something. */
+          float cov = sstep(4.6, 2.4, r + 1.5 * (f1.r - 0.5)
+                                        + 0.62 * (f2.b - 0.5));
           float ring = exp(-pow((r - 3.6 - 0.55 * sin(uTime * 0.7)
                                  - 0.8 * sin(a * 2.0 + uTime * 0.3)) / 2.1, 2.0));
-          float rafts = sstep(7.2, 2.2, r) * (0.25 + 1.5 * f1.g * (0.4 + 1.2 * f2.r));
-          cov = clamp(max(cov, max(ring * (0.62 + 0.42 * f1.r),
-                                   rafts * (0.55 + 0.6 * f1.r))), 0.0, 1.0);
+          /* Rafts by *threshold*, not by scale, and this is the correction to
+           * "the rafts do not break up outward".
+           *
+           * The previous line multiplied the map by a radial fade, which cannot
+           * produce a raft: scaling a smooth field down gives a dimmer smooth
+           * field, so the outer churn came back as a uniform grey veil at about
+           * a third of a unit of coverage — one solid object with a soft edge.
+           * A raft is a *region*, with white inside it and dark water beside it,
+           * and the only way to get regions out of a continuous field is to cut
+           * it at a level. The level rises with radius, so the rafts thin and
+           * separate as they travel instead of all ending at one contour. */
+          float lvl = 0.30 + 0.34 * sstep(2.2, 7.0, r);
+          float rf = f1.b * (0.55 + 0.75 * f1.r);
+          /* Cut hard. A 0.26-wide transition on a field whose own contrast is
+           * about that leaves no fully-covered interior and no clean outside —
+           * it is a soft grey veil again, arrived at from the other direction.
+           * A raft has a *rim*: white bubbles, then water, over a few
+           * centimetres. Halving the transition is what makes the outer churn
+           * read as a scatter of separate things. */
+          float rafts = sstep(lvl, lvl + 0.13, rf) * sstep(7.3, 2.0, r);
+          /* A second population at a coarser scale and a higher level, so the
+           * rafts are not all one size. Foam that has survived to five metres
+           * out has been through the same shear as the rest and has agglomerated
+           * — the surviving patches are bigger and further apart than the ones
+           * just leaving the churn, and one threshold on one field cannot say
+           * both. This is the term that puts a few large slabs among the small
+           * ones instead of a uniform grain. */
+          float big = sstep(0.56, 0.66, f2.b * (0.62 + 0.62 * f1.g))
+                    * sstep(8.6, 3.0, r);
+          rafts = max(rafts, big * 0.85);
+          /* And the tails. Everything the basin makes leaves it to the north —
+           * the outwash runs from the alcove to the pool — so the rafts that
+           * survive are drawn out downstream rather than radiating evenly, and
+           * without this the foam field is symmetric, which no foam field on
+           * moving water ever is. */
+          float tail = sstep(0.40, 0.72, f1.b * (0.5 + 0.9 * f2.r))
+                     * sstep(-0.5, 3.4, xz.y) * sstep(8.0, 3.0, r) * 0.9;
+          cov = clamp(max(max(cov, ring * (0.30 + 0.55 * f1.r)
+                                       * sstep(0.30, 0.60, f1.b)),
+                          max(rafts, tail)), 0.0, 1.0);
 
           /* Bubbles read as light *between* dark water, so the white goes on
            * top of the deep colour rather than the surface being tinted. */
-          diffuseColor.rgb = mix(uDeep, uWhite, cov * (0.82 + 0.18 * f2.b));
+          /* Bubble sparkle from the fine channel, read isotropically so it stays
+           * bubbles. This is the only place the 54-cell field belongs: as value
+           * variation inside a raft whose shape something else decided.
+           *
+           * The range is wide on purpose. At 0.78-to-1.0 of the way to white the
+           * foam mass had four per cent of internal contrast, so it arrived as
+           * one flat tone with a smooth outline — a meringue. A mass of bubbles
+           * is not one tone: it is lit crests with genuinely dark water in the
+           * crevices between them, and that contrast is the entire difference
+           * between reading it as churn and reading it as a solid object. */
+          float bub = f2.g * (0.55 + 0.75 * f2.r);
+          diffuseColor.rgb = mix(uDeep, uWhite, cov * (0.42 + 0.62 * bub));
           // The rim has to disappear into the pool. Anything sharper than
           // this is the mesh's own outline drawn across still water.
           float edge = sstep(7.4, 4.6, r);
-          diffuseColor.a *= clamp(max(cov, 0.30 + 0.5 * max(0.0, vH)) * edge, 0.0, 1.0);
+          /* Alpha follows the foam and almost nothing else.
+           *
+           * There used to be a flat 0.30 floor under this, so every fragment of
+           * a fifteen-metre disc drew at least a third of a unit of dark olive
+           * whether there was foam on it or not — a tinted lens lying over the
+           * basin, and in an isolated frame the churn read as a dark green mound
+           * with white blades on it rather than as foam on water. Where there is
+           * no foam there is no boil: the pool's own surface is already there and
+           * is already correct. The height term is kept at a fraction of what it
+           * was, purely so the shoulder of the mound still catches a little light
+           * and the relief does not vanish entirely in the clear water between
+           * rafts. */
+          diffuseColor.a *= clamp((cov + 0.22 * max(0.0, vH - 0.06)) * edge,
+                                  0.0, 1.0);
           /* And the churn is opaque, over the two metres where the sheet is
            * entering it. This is the term that makes the water touch the water:
            * the curtain's geometry runs on through the surface and this covers
            * the place where it does, so there is no boundary to see. */
-          // Ragged, not a disc. A hard-edged opaque circle is the same failure
-          // as a hard-edged opaque anything: the shape you see is the shape of
-          // the primitive.
+          /* Ragged, not a disc — and pulled well inside the mesh's own rim.
+           *
+           * The override used to carry alpha out to six metres, which is past
+           * the point where the height has faded to nothing. So beyond the
+           * mound there was a flat half-opaque annulus lying exactly in the
+           * water plane, and a flat annulus seen from eye height projects to a
+           * bright horizontal line across the whole frame. That was the razor
+           * seam. Multiplying by the same fade the geometry uses means the
+           * churn's opacity and its relief end together. */
+          /* Widened to 5.6 m, because the sheet is that wide by the time it
+           * arrives. At 4.4 the override stopped inboard of the curtain's own
+           * lower edge, so the outer metre of the fall ran on down past the
+           * churn and terminated on the still-water plane — a hard horizontal
+           * line either side of the mound, which is the same artificial edge
+           * this term exists to remove, just moved sideways. */
           diffuseColor.a = max(diffuseColor.a,
-                               sstep(6.0, 2.4, r) * (0.55 + 0.62 * f1.r));
+                               sstep(5.6, 2.4, r) * (0.55 + 0.62 * f1.r))
+                         * edge;
           gFoam = cov;
         `)
         .replace('#include <roughnessmap_fragment>', /* glsl */ `
           #include <roughnessmap_fragment>
-          roughnessFactor = mix(0.13, 0.82, gFoam);
+          // Never a mirror. The floor is what stops the churn returning a
+          // specular image of the sky, which is the other half of the blue.
+          roughnessFactor = mix(0.62, 0.88, gFoam);
         `)
         .replace('#include <emissivemap_fragment>', /* glsl */ `
           #include <emissivemap_fragment>
@@ -1276,6 +1962,8 @@ export class Water {
         tStrands: { value: this.tex.strands },
         uTime: this._surfaceUniforms().uTime,
         uFallT: { value: FALL_T },
+        // The surface the sheet lands in, so it can be cut off at it.
+        uWaterY: { value: ALCOVE_Y },
         uGlass: { value: new THREE.Color(0x0d1a1a) },
         /* Pulled well down from 0xe6eeee, and this is the correction to the
          * regression rather than a taste adjustment.
@@ -1306,15 +1994,18 @@ export class Water {
         varying float vAcross;
         varying float vCol;
         varying float vShell;
+        varying float vWY;
       ` + sh.vertexShader.replace('#include <begin_vertex>', /* glsl */ `
         #include <begin_vertex>
         vFall = aFall; vAcross = aAcross; vCol = aCol; vShell = aShell;
+        vWY = (modelMatrix * vec4(transformed, 1.0)).y;
       `);
 
       sh.fragmentShader = SSTEP + /* glsl */ `
         uniform sampler2D tStrands;
         uniform float uTime;
         uniform float uFallT;
+        uniform float uWaterY;
         uniform vec3 uGlass;
         uniform vec3 uWhite;
         uniform vec3 uScatter;
@@ -1322,6 +2013,7 @@ export class Water {
         varying float vAcross;
         varying float vCol;
         varying float vShell;
+        varying float vWY;
         float gAer = 0.0;
         float gRope = 0.0;
       ` + sh.fragmentShader
@@ -1450,6 +2142,19 @@ export class Water {
                        + 0.55 * sf.r * (0.30 + 0.70 * rope);
           a = mix(a, clamp(aBurst, 0.0, 1.0), burst);
 
+          /* Mass in the bottom third's core, and only there.
+           *
+           * Pulling the exposure down fixed the clipping and overshot into
+           * gauze: the cliff's cell texture read straight through the middle of
+           * a twenty-metre fall, which is not translucency, it is absence. The
+           * limbs are meant to be transparent and stay so — this term is gated
+           * on distance from the centreline as well as on fall time, so it
+           * cannot reach them. The inner third of the sheet's width, over the
+           * last third of its drop, is carrying the entire discharge plus the
+           * air beaten into it, and nothing is visible through that. */
+          float mass = burst * sstep(0.44, 0.16, abs(vAcross));
+          a = mix(a, 0.94 + 0.06 * rope, mass);
+
           /* The limbs, which is the term the sheet was missing and the reason
            * its silhouette terminated on a clean geometric line.
            *
@@ -1479,6 +2184,21 @@ export class Water {
            * fades out fast: it is there to be overlapped by the boil, not to
            * be seen through the pool. */
           a *= 1.0 - sstep(0.988, 1.012, vFall / uFallT) * 0.97;
+          /* And the same cut expressed in world height, which is the one that
+           * actually holds.
+           *
+           * The fall-time gate above assumes every column reaches the water at
+           * the same moment, and none of them do — each one is dropped by up to
+           * 1.7 m by its own lag, so a column can be two metres under the
+           * surface while its fall-time still says it is short of it. Two metres
+           * of curtain was therefore drawn *below* the pool at nearly full alpha,
+           * and from a camera near the water that is a mass of pale plates
+           * hanging under the churn where there should be dark water. The boil's
+           * opacity override covers the surface, not the volume beneath it.
+           *
+           * Height is the physically correct variable and it cannot be fooled by
+           * the drift: below the water there is no curtain, there is pool. */
+          a *= mix(0.03, 1.0, sstep(uWaterY - 0.30, uWaterY + 0.14, vWY));
 
           /* Aeration, which is what actually turns the water white — and the
            * direction of this gradient is the fourth finding.
@@ -1510,6 +2230,10 @@ export class Water {
           // transparent; without this they are pale and the sheet keeps its
           // hard edge in value even after it has lost it in alpha.
           val *= 1.0 - outer * 0.30;
+          // The dense core is white as well as opaque. Opacity alone over a
+          // dark cliff gives a grey slab, which is the other way to lose a
+          // fall's lower third.
+          val = mix(val, 0.78 + 0.18 * rope, mass * 0.85);
           // A floor, so the glassy top still catches enough light to exist
           // against a dark cliff rather than vanishing into it.
           diffuseColor.rgb = mix(uGlass, uWhite, clamp(max(val, 0.07), 0.0, 1.0));
@@ -1739,7 +2463,40 @@ export class Water {
       // shears with the column it belongs to instead of against it.
       col[k] = tear[i];
       shell[k] = sh;
-      nrm[k * 3] = 0; nrm[k * 3 + 1] = 0; nrm[k * 3 + 2] = sh;
+      /* The shading normal, taken from the trajectory rather than from the
+       * mesh, and this is the fix for the flat rectangular plates in the sheet.
+       *
+       * They were never a texture problem. Each column here drifts, wobbles in
+       * z and reaches the water at its own moment, by up to a couple of metres
+       * against a column spacing of about thirty centimetres — so in the lower
+       * half of the fall neighbouring columns genuinely cross one another and
+       * the quads between them are non-planar and self-intersecting. That is
+       * intended, it is what makes the silhouette ragged, and on its own it
+       * costs nothing: the sheet is drawn with an alpha that comes from the
+       * strand maps, not from the surface orientation.
+       *
+       * What made it visible was computeVertexNormals() below, which averaged
+       * the face normals of those crossing triangles and produced a different
+       * essentially arbitrary direction for each one. The material is a standard
+       * PBR surface, so its diffuse and specular both read that normal, and
+       * adjacent triangles a fraction of a degree apart in reality came back
+       * shaded a stop apart — which is precisely a field of flat plates with
+       * hard edges. Three passes looked for it in the strand map, the mip chain
+       * and the two-shell alpha, none of which were ever involved.
+       *
+       * A curtain's normal is a property of its trajectory, and the trajectory
+       * is known analytically here: the sheet is falling along the velocity
+       * vector, so its face points at right angles to it in the vertical plane.
+       * At the lip that is 46 degrees off horizontal, which is the tongue still
+       * rolling over the edge; twenty metres down the water is doing 21 m/s
+       * straight down and the face is vertical. Authoring it costs four lines,
+       * cannot be affected by the geometry crossing itself, and gives the sheet
+       * a single coherent response to the light shafts instead of a mosaic. */
+      const vy = EXIT_VY - G * Math.max(0, tf), vz = EXIT_VZ;
+      const vl = Math.hypot(vy, vz) || 1;
+      nrm[k * 3] = 0;
+      nrm[k * 3 + 1] = (vz / vl) * sh;
+      nrm[k * 3 + 2] = (-vy / vl) * sh;
     };
 
     for (let sh = 0; sh < 2; sh++) {
@@ -1779,7 +2536,8 @@ export class Water {
     g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2));
     g.setIndex(idx);
-    g.computeVertexNormals();
+    // No computeVertexNormals: it would discard the trajectory normals authored
+    // above, which is the bug that drew the plates. See put().
     g.computeBoundingSphere();
 
     this.curtain = new THREE.Mesh(g, this.curtainMat);
@@ -2064,6 +2822,11 @@ export class Water {
   setTier(tier) {
     if (tier === this.tier) return;
     this.tier = tier;
+    if (this.mirror) {
+      this.mirror.enabled = tier === 'high' || tier === 'ultra';
+      this.mirror.scale = MIRROR_SCALE[tier] || 0.36;
+      if (!this.mirror.enabled) this._surfaceUniforms().uMirror.value = 0;
+    }
     if (this.spray) {
       this.root.remove(this.spray);
       this.spray.geometry.dispose();
@@ -2105,13 +2868,18 @@ export class Water {
       lip: [+LIP.x.toFixed(2), +LIP.y.toFixed(2), +LIP.z.toFixed(2)],
       fallSeconds: +FALL_T.toFixed(2),
       drop: +(LIP_Y - ALCOVE_Y).toFixed(2),
+      mirror: this.mirror
+        ? (this.mirror.active ? `${this.mirror.target.width}x${this.mirror.target.height}` : 'idle')
+        : 'off',
     };
   }
 
   dispose() {
     for (const t of Object.values(this.tex)) t.dispose?.();
     this.surfaceMat.dispose();
+    this.streamMat.dispose();
     this.curtainMat.dispose();
     this.spray?.material.dispose();
+    this.mirror?.dispose();
   }
 }

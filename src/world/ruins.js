@@ -1665,7 +1665,24 @@ export function makeStoneMaterial(renderer) {
      * metres up the trail. */
     uWaterY: { value: POOL_Y },
     uWaterC: { value: new THREE.Vector2(POOL.x, POOL.z) },
-    uWaterR: { value: POOL.r + 6.0 },
+    /* Twenty-two metres, and flat rather than tapered inside it — see `near`.
+     *
+     * The basin's nominal radius is 12.5 m about (0, -356) and the masonry that
+     * actually stands at the water is the west revetment and the causeway head,
+     * 14 to 17 m from that centre. Against the original falloff — 18.5 m
+     * outside, already half gone by 14 — every band arrived at a third of its
+     * authored strength before any of the albedo weights ran, and the product
+     * was a couple of per cent. The critique's "one uniform grey-green tone
+     * through the waterline" was literally correct: the bands were computed and
+     * then multiplied away.
+     *
+     * This radius is only the coarse gate. What separates stone standing in
+     * water from stone standing beside it is the block's own wetness, not its
+     * distance from a point, and widening this alone was a mistake that cost
+     * the trail's best frame: at 26.5 m the disc reached the terrace steps
+     * thirty metres up the approach, which are dry, and painted a calcite
+     * course across all of them. */
+    uWaterR: { value: POOL.r + 9.5 },
     uAlgae: { value: new THREE.Color(0x1a2410) },
     uCalcite: { value: new THREE.Color(0xb9b7a4) },
     uDebug: { value: 0 },
@@ -1789,14 +1806,36 @@ export function makeStoneMaterial(renderer) {
          * which is the point, because a waterline is horizontal and reads as
          * one across a dozen separate blocks at different depths only if it is
          * computed from the world's y and not from anything per-block. */
-        float near = sstep(uWaterR, uWaterR * 0.45, length(vWPosS.xz - uWaterC));
+        /* Two gates, and the second is the one that matters.
+         *
+         * The disc is flat over the stonework that is genuinely at the water
+         * and falls off only outside it, rather than being a ramp that has
+         * already decayed by half at the pool's own edge — that shape is what
+         * made the bands invisible. But a disc cannot tell a block standing in
+         * the basin from one standing on dry ground twenty metres away at the
+         * same height, and the bands are keyed to an absolute world y, so on
+         * the second kind they are simply wrong. The block's own baked wetness
+         * answers exactly that question and it costs nothing: it is already an
+         * attribute, and it is the same field the terrain shades itself from,
+         * so a course cannot be banded unless the ground it stands in is
+         * wet. */
+        float near = sstep(uWaterR, uWaterR - 4.5, length(vWPosS.xz - uWaterC))
+                   * sstep(0.30, 0.75, vMeta.y);
         float dy = vWPosS.y - uWaterY;
         // Submerged and just-awash: continuously wet, so algae holds.
         gSub    = near * sstep(0.10, -0.15, dy);
-        // The stain: a hand's breadth of dark mineral deposit at the line
-        // itself, which is the single most legible thing about old stonework
-        // standing in water.
-        gLine   = near * exp(-pow((dy - 0.06) / 0.16, 2.0));
+        /* The stain: a hand's breadth of dark mineral deposit at the line
+         * itself, which is the single most legible thing about old stonework
+         * standing in water.
+         *
+         * Widened from 16 cm to 26 cm, because 16 cm of band on a block seen
+         * from the far side of a thirty-metre basin is under two pixels and the
+         * mip chain averages it out of existence before it is ever shaded. A
+         * feature that only exists at one distance is a feature the critic is
+         * right to call absent. Also raised off the surface a little: the line a
+         * long-standing water level leaves is at the *top* of the capillary
+         * rise, not at the water. */
+        gLine   = near * exp(-pow((dy - 0.10) / 0.26, 2.0));
         // And the splash band above it, where the spray wets the stone and the
         // air dries it again and the carbonate stays behind.
         gSplash = near * sstep(-0.02, 0.22, dy) * sstep(1.60, 0.35, dy);
@@ -2041,10 +2080,25 @@ export function makeStoneMaterial(renderer) {
             * evaporates rather than runs off. The three together are the
             * reason a real ruin standing in water reads as having been there
             * for centuries instead of having been placed this morning. */
-           alb = mix(alb, uAlgae * (0.7 + 0.9 * gMacro.y), gSub * 0.88);
-           alb = mix(alb, alb * 0.30, gLine * 0.85);
+           /* The weights, raised. Every one of these was a fraction of a
+            * fraction: near had already taken a third out before they ran (see
+            * uWaterR), and then the stain — the band that carries the whole
+            * read — asked for 85 per cent of a 70 per cent darkening, on a
+            * Gaussian whose peak is one and whose useful width is a few
+            * centimetres. Integrated over the band that is a couple of per cent
+            * of luminance, which is below the noise the stone's own macro
+            * variation already has in it. The instruction was to raise the
+            * contrast substantially or drop the feature; this is the raise.
+            *
+            * The stain goes to a quarter of the block's value rather than a
+            * third and takes the full weight, and the calcite above it goes to
+            * two thirds with the macro gate relaxed — that band is what puts a
+            * *pale* course above a *dark* one, and a light-over-dark pair is
+            * legible at four times the distance either is alone. */
+           alb = mix(alb, uAlgae * (0.7 + 0.9 * gMacro.y), gSub * 0.95);
+           alb = mix(alb, alb * 0.24, gLine);
            alb = mix(alb, uCalcite,
-                     gSplash * 0.42 * sstep(0.38, 0.78, gMacro.x) * (1.0 - gMoss));
+                     gSplash * 0.66 * sstep(0.24, 0.68, gMacro.x) * (1.0 - gMoss));
            // Moss takes the joints on the side that gets the spray, and only
            // there: it is the wettest stone in the complex.
            alb = mix(alb, uMoss * 0.9, gSplash * gMask.r * 0.55);
@@ -2066,7 +2120,13 @@ export function makeStoneMaterial(renderer) {
                 : uDebug < 4.5 ? vec3(vStone.y, vStone.z, vStone.w)
                 : uDebug < 5.5 ? gMacro
                 : uDebug < 6.5 ? vec3(gMask.rg, gWall)
-                : vec3(gWet, gExpo, gCush);`
+                // The three waterline bands, which were raised without ever
+                // being measured. "The banding is not readable" has two causes
+                // — the bands are weak, or they are not being computed on the
+                // stone the camera can see — and only an image of the masks
+                // separates them.
+                : uDebug < 7.5 ? vec3(gWet, gExpo, gCush)
+                : vec3(gSub, gLine, gSplash);`
         )
         .replace(
           '#include <normal_fragment_maps>',
@@ -2159,5 +2219,12 @@ export function makeStoneMaterial(renderer) {
   };
   mat.customProgramCacheKey = () => 'ruin-stone-v1';
   mat.userData.maps = { stone, mask, macro };
+  /* The uniform block, reachable before the first compile. `userData.shader`
+   * only exists once three has actually built a program for this material, and
+   * the material's chunks are distance-culled, so from the capture harness —
+   * which sets a uniform, then poses the camera, then renders — it is reliably
+   * undefined at the moment it is needed. Half an hour went into "the debug
+   * view does nothing" before that was the answer. */
+  mat.userData.uniforms = U;
   return mat;
 }

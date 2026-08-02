@@ -123,6 +123,40 @@ const SPECIES_LOD = {
   deadVine:  { tile: 64, cull: 66,  cast: false, v: 3 },
 };
 
+/* How far back from the brook's waterline each species has to stand, in metres.
+ *
+ * Absent means "no rule", which is right for the canopy — a tree leaning over a
+ * stream is the whole character of a jungle creek and its crown is twenty
+ * metres up in any case. The rule is for the understory, and the numbers are
+ * roughly the plant's own radius: what is being asserted is that nothing broad
+ * gets established in the scour zone, which is true of a channel with running
+ * water in it and undercut banks.
+ *
+ * It exists because of a measurement rather than a preference. The channel is
+ * correctly incised and the water in it is correctly placed, and the frame a
+ * player actually gets at eye height on the trail was still solid foliage with
+ * a dark slot behind it: a two-metre stream cannot survive a two-metre
+ * understory closing over it. Everything else in the brook is downstream of
+ * being able to see it.
+ *
+ * `litterMat` is here for a different reason — a scoured bank has no leaf mat
+ * on it, and a mat of flat leaves running to the water's edge is exactly what
+ * made the channel read as a dry gully floored with debris.
+ */
+const BANK_CLEAR = {
+  thicket: 1.5, tussock: 1.15, palm: 1.25, broadleaf: 1.0,
+  sapling: 0.95, vine: 1.0, fern: 0.40, litterMat: 0.55, log: 0.7,
+};
+
+/* Ragged, and stable across builds. A margin of constant width reads as mown,
+ * and using the scatter's own rng for the jitter would make the whole forest
+ * depend on the brook — this is the position hash the scatter grids already
+ * lean on elsewhere for the same reason. */
+const bankJitter = (x, z) => {
+  const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+  return s - Math.floor(s);
+};
+
 /* Vertex-stage wind, and the two geometric corrections that ride with it.
  *
  * Displacing in world space rather than object space matters: instances are
@@ -828,6 +862,10 @@ export class Vegetation {
          * does; there is nothing for the tolerance to buy. */
         const wd = standingWater(px, pz, y, t.brook, q);
         if (wd > (name === 'litterMat' ? 0.005 : 0.06)) continue;
+        // The scour zone along the brook — see BANK_CLEAR.
+        const bc = BANK_CLEAR[name];
+        if (bc !== undefined
+            && t.brook.clearAt(q) < bc * (0.45 + 1.1 * bankJitter(px, pz))) continue;
         t.normal(px, pz, nrm);
 
         /* Stone under this candidate.
