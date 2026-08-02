@@ -102,12 +102,12 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=high' }, async ({ page,
    * proves nothing on its own.
    *
    * A head turn is the motion documentary footage is full of and the one a
-   * viewer has seen blurred ten thousand times. Fifty degrees a second is an
-   * unhurried look around; over a sixtieth of a second that is fourteen
-   * pixels of travel at this field of view, and at the shutter set in
-   * render/grade.js about fifteen pixels of smear.
+   * viewer has seen blurred ten thousand times. Thirty-three degrees a second
+   * is an unhurried look around the clearing; at this field of view that is
+   * nine pixels of travel per frame, and at the shutter set in
+   * render/grade.js nine pixels of smear.
    */
-  const PAN = 'g.walker.yaw += 0.0155;';
+  const PAN = 'g.walker.yaw += 0.0097;';
   await grab(page, path.join(outDir, 'motion-pan-on.png'),
              ALL + "g.goTo(0.96); g.warp(2.0);", 10, PAN);
   await grab(page, path.join(outDir, 'motion-pan-off.png'), P + 'p.want.motion = false;');

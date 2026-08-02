@@ -104,6 +104,12 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=' + TIER }, async ({ pa
       ['motion only', { ...OFF, motion: true }, panning],
       ['all', { motion: true, dof: true, bloom: true, grade: true, grain: true }, still],
       ['all + motion', { motion: true, dof: true, bloom: true, grade: true, grain: true }, panning],
+      /* And the whole frame, scene pass included, so the isolated post numbers
+       * above can be read against something. These two are the before and
+       * after of the entire system. */
+      ['frame, post off', OFF, () => g.render()],
+      ['frame, post on', { motion: true, dof: true, bloom: true, grade: true, grain: true },
+        () => g.render()],
     ];
 
     // One scene pass, whose output every timed block then re-processes.
@@ -138,13 +144,18 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=' + TIER }, async ({ pa
     return out;
   }, [STOP, TIER]);
 
+  /* Deltas are against the first row for the isolated post cases and against
+   * the post-off frame for the two whole-frame ones, since those are measuring
+   * a different thing. */
   const base = rows[0].ms;
+  const frameBase = rows.find(r => r.name === 'frame, post off').ms;
   console.log(`  t=${STOP}  tier=${TIER}`);
-  console.log('  case            ms    delta     p01    p10    med    p90    p99   contr  black  blown');
+  console.log('  case               ms    delta     p01    p10    med    p90    p99   contr  black  blown');
   for (const r of rows) {
     const h = r.hist;
-    console.log(`  ${r.name.padEnd(13)} ${r.ms.toFixed(2).padStart(5)} ` +
-      `${(r.ms - base >= 0 ? '+' : '') + (r.ms - base).toFixed(2).padStart(6)}  ` +
+    const b = r.name.startsWith('frame') ? frameBase : base;
+    console.log(`  ${r.name.padEnd(16)} ${r.ms.toFixed(2).padStart(5)} ` +
+      `${(r.ms - b >= 0 ? '+' : '') + (r.ms - b).toFixed(2).padStart(6)}  ` +
       `${String(h.p01).padStart(6)} ${String(h.p10).padStart(6)} ${String(h.median).padStart(6)} ` +
       `${String(h.p90).padStart(6)} ${String(h.p99).padStart(6)} ${String(h.contrast).padStart(6)} ` +
       `${String(h.blackPct).padStart(6)} ${String(h.blownPct).padStart(6)}`);

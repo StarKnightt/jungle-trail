@@ -49,12 +49,29 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=high' }, async ({ page,
       inf.autoReset = true;
       return c;
     };
+    /* A one-pixel readback rather than glFinish, and the difference is the
+     * whole measurement.
+     *
+     * Chromium runs WebGL over a command buffer into a separate GPU process,
+     * and finish() in the page returns once that queue has been handed over
+     * rather than once the hardware has drained it. What it therefore times is
+     * how fast JavaScript can submit draw calls — which for a scene of five
+     * hundred is a real and interesting number, and is why this tool's whole
+     * frame timings were roughly right, but which for a chain of ten
+     * full-screen passes is forty microseconds regardless of what the shaders
+     * do. The symptom was that adding post-processing appeared to make the
+     * frame faster, and that ultra came out quicker than medium.
+     *
+     * readPixels cannot return without the frame existing, so it is a real
+     * fence. One pixel costs nothing beyond the wait. */
+    const px = new Uint8Array(4);
+    const sync = () => glc.readPixels(0, 0, 1, 1, glc.RGBA, glc.UNSIGNED_BYTE, px);
     const time = (fn, n) => {
       for (let i = 0; i < 8; i++) fn();
-      glc.finish();
+      sync();
       const t0 = performance.now();
       for (let i = 0; i < n; i++) fn();
-      glc.finish();
+      sync();
       return (performance.now() - t0) / n;
     };
     const full = () => { g.atmos.enabled = true; g.render(); };

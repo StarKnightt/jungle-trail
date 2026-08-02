@@ -736,6 +736,21 @@ void main(){
    * A per-channel component on top of a shared one, because a colour negative
    * has three independently grainy layers, and grain that is purely luminance
    * reads as video noise rather than as film.
+   *
+   * The amplitude is set in code values so that it can be argued about, and
+   * it was set by measurement rather than by eye: the high-frequency residual
+   * of a flat patch of mist, which is the only place in this frame with no
+   * detail of its own to hide behind. At the peak of the parabola the noise is
+   * uniform over five code values per channel, which comes out as a luminance
+   * standard deviation of about one — present, and roughly a third of what a
+   * scanned thirty-five millimetre frame carries. The first version was at
+   * 1.15 and measured 0.83 against 0.80 for no grain at all, which is to say
+   * it was quantised away before it reached the file.
+   *
+   * Half of it is shared between the channels and half is not. All-shared is
+   * luminance noise, which is what a sensor makes and not what an emulsion
+   * makes; all-independent is chroma noise, which is the most visible kind per
+   * unit of standard deviation and the one that reads as a bad JPEG.
    */
   vec3 g3 = fract(sin(vec3(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)),
                            dot(gl_FragCoord.xy, vec2(39.3468, 11.135)),
@@ -743,7 +758,7 @@ void main(){
                        + uGrain.y) * 43758.5453) - 0.5;
   float y = clamp(luma(gl_FragColor.rgb), 0.0, 1.0);
   float amp = uGrain.x * (0.25 + 3.0 * y * (1.0 - y)) / 255.0;
-  gl_FragColor.rgb += (g3.x * 0.35 + g3 * 0.65) * amp;
+  gl_FragColor.rgb += mix(vec3(dot(g3, vec3(0.3333))), g3, 0.5) * amp;
 
   /* And the ordered dither that used to live at the end of the composite.
    * Grain would in fact hide the banding it exists to remove, but only at an
@@ -917,7 +932,7 @@ export class Grade {
     this.nearMat = this._mat('near', NEAR_FRAG, {
       tHalf: { value: null },
       uTexel: { value: new THREE.Vector2() },
-      uNear: { value: new THREE.Vector2(16, 1.15) },
+      uNear: { value: new THREE.Vector2(16, 1.0) },
       uTaps: { value: 12 },
     });
     this.preMat = this._mat('pre', BLOOM_PRE_FRAG, {
@@ -950,7 +965,7 @@ export class Grade {
       uBloom: { value: 0.024 },
       uAberr: { value: new THREE.Vector3(0.0018, 0, 0) },
       uVignette: { value: new THREE.Vector2(0.13, 4.0) },
-      uGrain: { value: new THREE.Vector2(1.15, 0) },
+      uGrain: { value: new THREE.Vector2(5.0, 0) },
       uDebug: { value: 0 },
       uSlope: { value: GRADE.slope.clone() },
       uOffset: { value: GRADE.offset.clone() },
@@ -1075,7 +1090,7 @@ export class Grade {
     fm.uTexel.value.set(1 / t.pw, 1 / t.ph);
     fm.uCoC.value.set(cocScale, this.focus, this.maxFarPx);
     fm.uEnable.value.set(doDof ? 1 : 0, doBloom ? 1 : 0, this.want.grade ? 1 : 0);
-    fm.uGrain.value.x = this.want.grain ? 1.15 : 0;
+    fm.uGrain.value.x = this.want.grain ? 5.0 : 0;
     /* Advanced per frame so the grain moves. A static pattern over a moving
      * image is fixed-pattern sensor noise, which is a different and much more
      * synthetic-looking thing than film grain — and the eye locks onto it
