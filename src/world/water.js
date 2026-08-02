@@ -1564,7 +1564,16 @@ export class Water {
     for (let j = 0; j < NR; j++) {
       for (let i = 0; i < NA; i++) {
         const a = j * W + i, b = a + 1, c = a + W, d = c + 1;
-        idx.push(a, c, b, b, c, d);
+        /* Wound so the front face points up. The ring runs anticlockwise in x
+         * and z, so the obvious order (a, c, b) gives a face normal of -y: on a
+         * mesh drawn FrontSide that is the whole disc facing the basin floor,
+         * and every camera above the water culls it. It survived review because
+         * the shading normal is computed analytically in the vertex shader and
+         * does point up, so nothing about the lighting looked wrong — the churn
+         * was simply not drawn. All that reached the frame were the triangles on
+         * the mound's shoulder steep enough to flip, which is a thin wavy line
+         * at the foot of the curtain and nothing else. */
+        idx.push(a, b, c, b, d, c);
       }
     }
     const g = new THREE.BufferGeometry();
@@ -1788,10 +1797,27 @@ export class Water {
            * The anisotropy comes down with it. Just under two to one is enough
            * for the rafts to lean outward and be read as travelling; three to
            * one combs them whatever channel they came from. */
-          vec2 rc = xz - dir * adv;
-          vec2 ac = vec2(-dir.y, dir.x);
-          vec4 f1 = texture2D(tFoam, vec2(dot(rc, dir) * 0.075,
-                                          dot(rc, ac) * 0.135) + 0.5);
+          /* The across-flow coordinate has to come from the *bearing*, not from
+           * a component of the position, and getting that wrong is why the
+           * rafts never broke up.
+           *
+           * Every point of this disc is dir * r by construction, so the
+           * across-flow axis ac is perpendicular to the only direction the
+           * position has: dot(rc, ac) is identically zero at every fragment.
+           * The sample therefore ran along a single row of the foam map indexed
+           * by radius alone, which makes the entire raft field a function of r —
+           * concentric rings, thresholded into concentric bands. No amount of
+           * cutting a field that has no angular variation produces patches.
+           *
+           * Sampling dir * g(r) instead keeps the advection and restores the
+           * bearing, and the anisotropy comes out of the shape of g: the radial
+           * scale is dg/dr and the tangential scale is g(r)/r, so holding g
+           * below r by a fixed offset stretches features along the radial
+           * without combing them. 0.58 with the offset taken at the middle of
+           * the raft annulus is a shade under two to one there, which is the
+           * ratio the note below asks for. */
+          vec2 rc = dir * (0.58 * (r - adv) + 0.42 * 4.0);
+          vec4 f1 = texture2D(tFoam, rc * 0.128 + 0.5);
           vec4 f2 = texture2D(tFoam, (xz - dir * adv * 1.7) * 0.20 + vec2(0.31, 0.77));
 
           /* Coverage. Total over the dome, then a ring that the waves carry
@@ -1822,10 +1848,33 @@ export class Water {
            * times finer lets the boundary reach *inward* in places as well as
            * outward, so the core's edge has bays and headlands in it and the
            * rafts outside it look like they came off something. */
-          float cov = sstep(4.6, 2.4, r + 1.5 * (f1.r - 0.5)
+          /* The core is the width of the sheet and not the width of the mesh.
+           *
+           * At 4.6 m the saturated disc reached most of the way to the rim, so
+           * once the mesh was actually being drawn the churn arrived as one
+           * white object nine metres across with a soft edge — the "solid mass
+           * rather than a raft field" reading, with the raft machinery outside
+           * it having nothing left to break up. The sheet is a little over three
+           * metres wide where it enters, and that is the only part of the basin
+           * where foam is made faster than it disperses. Everything beyond it is
+           * drifting foam and belongs to the threshold terms below.
+           *
+           * This is deliberately not the same radius as the alpha override
+           * further down. The override has to cover the curtain's own lower
+           * edge or the fall terminates on a visible line, but covering it with
+           * *opacity* and covering it with *white* are different claims: what
+           * the override needs is for the basin to be opaque there, and dark
+           * water with rafts on it satisfies that as well as a white sheet does
+           * and reads as water rather than as meringue. */
+          float cov = sstep(3.5, 1.7, r + 1.5 * (f1.r - 0.5)
                                         + 0.62 * (f2.b - 0.5));
-          float ring = exp(-pow((r - 3.6 - 0.55 * sin(uTime * 0.7)
-                                 - 0.8 * sin(a * 2.0 + uTime * 0.3)) / 2.1, 2.0));
+          /* Narrower than it was. At 2.1 m of Gaussian width this covered the
+           * whole raft annulus on its own, so whatever the thresholds below did
+           * was applied on top of a veil that never went to zero — and a veil
+           * is the one thing that stops separate patches reading as separate. A
+           * wave crest carrying foam out is about a metre wide. */
+          float ring = exp(-pow((r - 3.5 - 0.55 * sin(uTime * 0.7)
+                                 - 0.8 * sin(a * 2.0 + uTime * 0.3)) / 1.7, 2.0));
           /* Rafts by *threshold*, not by scale, and this is the correction to
            * "the rafts do not break up outward".
            *
@@ -1837,7 +1886,12 @@ export class Water {
            * and the only way to get regions out of a continuous field is to cut
            * it at a level. The level rises with radius, so the rafts thin and
            * separate as they travel instead of all ending at one contour. */
-          float lvl = 0.30 + 0.34 * sstep(2.2, 7.0, r);
+          /* Cut higher, everywhere. With the core pulled back to the width of
+           * the sheet the rafts now have the whole annulus from three to seven
+           * metres to themselves, and at the old level they simply filled it —
+           * a threshold that passes two thirds of a field is not a raft field,
+           * it is the same solid disc arrived at from outside. */
+          float lvl = 0.42 + 0.34 * sstep(2.0, 7.2, r);
           float rf = f1.b * (0.55 + 0.75 * f1.r);
           /* Cut hard. A 0.26-wide transition on a field whose own contrast is
            * about that leaves no fully-covered interior and no clean outside —
@@ -1863,8 +1917,8 @@ export class Water {
            * moving water ever is. */
           float tail = sstep(0.40, 0.72, f1.b * (0.5 + 0.9 * f2.r))
                      * sstep(-0.5, 3.4, xz.y) * sstep(8.0, 3.0, r) * 0.9;
-          cov = clamp(max(max(cov, ring * (0.30 + 0.55 * f1.r)
-                                       * sstep(0.30, 0.60, f1.b)),
+          cov = clamp(max(max(cov, ring * (0.22 + 0.46 * f1.r)
+                                       * sstep(0.34, 0.66, f1.b)),
                           max(rafts, tail)), 0.0, 1.0);
 
           /* Bubbles read as light *between* dark water, so the white goes on
