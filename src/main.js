@@ -136,24 +136,7 @@ class Game {
      * sage as they receded — the middle distance was not losing detail
      * gradually, it was being clamped flat. A darker, greyer haze lets the far
      * boles keep their silhouettes while still closing the corridor off. */
-    /* Cut by nearly a third in the post pass's second round, and this is the
-     * change the whole mid distance was waiting for. At 0.038 the fog was 44 per
-     * cent at twenty metres and 73 at thirty, which means everything past eight
-     * metres was being lerped most of the way to one colour — so depth was
-     * being carried by fog rather than by silhouette layering and occlusion,
-     * and a stack of overlapping crowns arrived as a flat khaki wall. Real
-     * jungle mid-ground is the opposite: fog contributes very little and the
-     * depth cue is that near dark holes overlap far bright leaves at half a
-     * dozen scales.
-     *
-     * At 0.027 the same distances read 23 and 46 per cent, which leaves the
-     * silhouettes their contrast while still closing the corridor. It is the
-     * far end that has to keep working and it does: at fifty metres this is
-     * still 82 per cent, so the waterfall seen from the temple clearing is the
-     * same soft hazed smear behind the ruins that it was. Fog is exponential in
-     * the square of distance, so it can be cut hard in the band the eye reads
-     * detail in and barely move at the range that closes the world off. */
-    scene.fog = new THREE.FogExp2(0x323c2c, 0.027);
+    scene.fog = new THREE.FogExp2(0x323c2c, 0.038);
 
     const sl = this.sky.sunLight();
     this.sun = new THREE.DirectionalLight(sl.color, sl.intensity);

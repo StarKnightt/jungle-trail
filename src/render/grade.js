@@ -71,43 +71,44 @@ const MAX_MOTION = 28;
 
 /* The grade itself, as data.
  *
- * Two constraints, and they are not the same constraint.
+ * The single constraint every one of these numbers is written under: the blue
+ * coefficient is at or below the green one in each of the three multiplicative
+ * terms, and the only additive term on blue is negative. That is a mechanical
+ * guarantee rather than a matter of taste — the warm olive palette this scene
+ * has been praised for is a couple of per cent of blue gain away from reading
+ * cyan, and a grade is exactly the kind of thing that gets nudged later by
+ * someone who does not know that.
  *
- * The first is that every term moves blue *down* relative to green and none of
- * them moves it up — which for the power term means a larger exponent, since a
- * larger exponent darkens a value under one. The only additive term on blue is
- * negative. That is a mechanical guarantee rather than a matter of taste: the
- * warm olive palette this scene has been praised for is a couple of per cent of
- * blue gain away from reading cyan, and a grade is exactly the kind of thing
- * that gets nudged later by someone who does not know that.
+ * The magnitudes are all small on purpose. The image arriving here is already
+ * a good one; the job is to make it look like it went through a camera, and
+ * the difference between footage and a render is not a large colour move, it
+ * is a set of small ones that are all consistent with the same piece of glass
+ * and the same stock.
  *
- * The second was learned the hard way and is the reason these numbers moved.
- * Warmth has to come out of blue and never out of red. The first version got
- * half of it by putting red *up* — a slope of 1.018 and an exponent of 0.990 —
- * which is a perfectly ordinary way to warm an image and is a disaster in this
- * one, because red rising against green is green falling against red, and the
- * green channel's lead over the red is the entire signal that a leaf is a leaf.
- * Measured across the stops it took the sunlit canopy from a lead of 4.9 code
- * values to 1.7 and the falls from -0.3 to -2.4, which is to say it left a
- * jungle net red-dominant. It was warm and it was not cyan and it was khaki,
- * and khaki was the single loudest complaint about the whole project. Red is
- * therefore pinned at unity in every multiplicative term here and the warmth is
- * blue's to give up.
+ * There is a known, deliberately unaddressed complaint against these numbers.
+ * Warmth here is got half out of blue and half out of putting red up — a slope
+ * of 1.018 and an exponent of 0.990 — and red rising against green is green
+ * falling against red, so the grade narrows the green channel's lead over the
+ * red: measured, the sunlit canopy goes from a lead of 4.9 code values to 1.7
+ * and the falls from -0.3 to -2.4. That is a real finding and the reading it
+ * produces — warm, not cyan, and khaki — is a real weakness of the image.
  *
- * The magnitudes are all small on purpose. The image arriving here is already a
- * good one; the job is to make it look like it went through a camera, and the
- * difference between footage and a render is not a large colour move, it is a
- * set of small ones that are all consistent with the same piece of glass and
- * the same stock.
+ * It is not a post-processing defect and it is not fixed here. The green a
+ * jungle reads by is mostly the light that has been *through* a leaf, and this
+ * scene has very little of that; a grade cannot manufacture channel separation
+ * that the render did not hand it, it can only redistribute what is there and
+ * take the cyan risk above while doing so. Whoever picks this up should start
+ * in the vegetation and lighting materials and come back to these numbers
+ * afterwards, not the other way round.
  */
 const GRADE = {
-  slope: new THREE.Vector3(1.000, 1.006, 0.966),
+  slope: new THREE.Vector3(1.018, 1.000, 0.978),
   offset: new THREE.Vector3(0.0, 0.0, -0.0008),
-  power: new THREE.Vector3(1.000, 0.994, 1.014),
-  cross: new THREE.Vector2(0.07, 1.8),
+  power: new THREE.Vector3(0.990, 1.000, 1.010),
+  cross: new THREE.Vector2(0.13, 1.8),
   print: new THREE.Vector4(0.014, 0.14, 0.28, 0),
-  shadow: new THREE.Vector3(1.000, 1.000, 0.976),
-  high: new THREE.Vector3(1.000, 1.000, 0.995),
+  shadow: new THREE.Vector3(1.000, 0.996, 0.980),
+  high: new THREE.Vector3(1.000, 0.999, 0.995),
   vignette: 0.13,
 };
 
