@@ -140,12 +140,33 @@ export class Brook {
       const t = BROOK_T0 + (BROOK_T1 - BROOK_T0) * i / N;
       const s = sample(t);
       const off = brookOffset(t);
-      /* Half-width of the wetted channel. Two incommensurate sines so the
+      /* Half-width of the wetted channel. Four incommensurate sines so the
        * stream pinches and opens the way a real one does between its bars;
        * the mean is deliberately small, because the first build ran a
        * fourteen-metre-wide sheet down a jungle hillside and called it a
-       * brook. */
-      let half = 1.02 + 0.40 * Math.sin(t * 23.0 + 0.7) + 0.26 * Math.sin(t * 8.0);
+       * brook.
+       *
+       * Two of the four are new, and they are there because the first two are
+       * the wrong length. `t` runs 0.40 to 0.93 over about two hundred and
+       * twenty-five metres of trail, so a frequency of 23 is a wavelength of a
+       * hundred and twenty-five metres and a frequency of 8 is longer than the
+       * brook. Over the eight or nine metres of channel in any one frame both
+       * are a constant, which is precisely the "rather straight banks, reads
+       * like a channel" note: the width was varying, but only between parts of
+       * the stream that are never in shot together. 97 and 251 are twenty-seven
+       * and eleven metres, which is a bar and a pinch inside one view. The
+       * envelope is held where it was — the low-frequency amplitudes come down
+       * by as much as the new ones add — because the mean and the extremes were
+       * both chosen against the mesh and the trail's clearance, and this is
+       * meant to change the *scale* of the variation and nothing else.
+       *
+       * 251 is a wavelength of about eleven metres against a sample spacing of
+       * ninety-four centimetres, so it is resolved by roughly twelve stations.
+       * Much above this and the width starts to alias into the station grid,
+       * which would put a beat in the banks rather than a bar. */
+      let half = 1.10
+               + 0.24 * Math.sin(t * 23.0 + 0.7) + 0.16 * Math.sin(t * 8.0)
+               + 0.22 * Math.sin(t * 97.0 + 2.1) + 0.12 * Math.sin(t * 251.0 + 0.4);
       // Opening into a delta where it meets the basin.
       half += 1.7 * smoothstep(0.895, BROOK_T1, t);
       st[i] = {
