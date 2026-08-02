@@ -381,7 +381,30 @@ const TRANS_APPLY = /* glsl */ `
   vec3 Vv = normalize( vViewPosition );
   vec3 Hs = normalize( uSunView + Nv * 0.60 );
   float I = pow( clamp( dot( Vv, -Hs ), 0.0, 1.0 ), 3.2 );
-  vec3 through = uSunColor * I * uTrans;
+  /* Gated on whether the sun actually reached the back of this leaf, which is
+   * the same canopy transmittance the floor's sunflecks are made of.
+   *
+   * Ungated — which is how this started — the term is a constant glow over
+   * every leaf in the frame, and a constant glow is the exact opposite of what
+   * it is for. Real mid-ground jungle is a stack of overlapping dark holes with
+   * a few vividly backlit leaves among them, at half a dozen scales; that
+   * contrast is what carries depth, and an even wash across all of it is a
+   * large part of why everything past eight metres was reading as one flat
+   * khaki wall lit one way. With the gate the variance goes where the light is:
+   * a leaf under a gap glows hard and the leaf beside it under two metres of
+   * crown stays dark, so the layers separate by their own luminance instead of
+   * by fog.
+   *
+   * The gain is raised to pay for the gate, which passes about a sixth of the
+   * frame at this canopy density. The floor is what an unlit leaf still passes:
+   * skylight gets through a canopy from everywhere at once, so even a leaf with
+   * no sun on it is not opaque — it is just not glowing.
+   *
+   * gCanopyMask comes from render/canopy.js, which is patched onto this
+   * material afterwards by main.js and inserts before the directive this block
+   * is appended to. The ordering is a contract between those two files.
+   */
+  vec3 through = uSunColor * I * uTrans * mix( 0.22, 1.0, gCanopyMask.x );
   /* Skylight comes through the canopy from every direction at once, so it has
    * no lobe — but it is the only thing lighting the undersides in shade, and
    * it is what keeps the understory from separating into lit greens and black
@@ -396,7 +419,29 @@ const TRANS_APPLY = /* glsl */ `
    * the leaves a side to be lit from. Building the actual dappled sunlight is
    * a later system and is deliberately not attempted here. */
   through += uSkyColor * 0.25;
-  reflectedLight.indirectDiffuse += through * vLeafTrans * diffuseColor.rgb * 2.0;
+
+  /* And the light comes out green, harder than the albedo says.
+   *
+   * A leaf's reflectance and its transmittance are different spectra, and the
+   * transmitted one is far more selective: chlorophyll absorbs red and blue in
+   * a single pass through the mesophyll, so a leaf passes something like a fifth
+   * of the green landing on it and a fortieth of the red. Reflectance is
+   * partly specular and partly scatter off the cuticle, so it is much closer to
+   * neutral. Multiplying the transmitted light by the albedo once — which is
+   * what this did — filters it as though the light had bounced off the leaf
+   * rather than gone through it, and understates the green by about a factor of
+   * two.
+   *
+   * Squaring the albedo and renormalising by its own luminance is that second
+   * pass: the same amount of light comes out, with twice the hue in it. That is
+   * the single largest reason this frame reads khaki rather than green, and it
+   * is a physical statement rather than a colour preference — the place to put
+   * green back into a jungle is the light that has been through a leaf, because
+   * that is the light that is green.
+   */
+  vec3 lam = diffuseColor.rgb;
+  vec3 filt = lam * lam / max( dot( lam, vec3( 0.34, 0.50, 0.16 ) ), 1e-3 );
+  reflectedLight.indirectDiffuse += through * vLeafTrans * filt * 2.0;
 }
 `;
 
@@ -613,7 +658,11 @@ export class Vegetation {
       // Raised alongside the cut to the flat skylight term in TRANS_APPLY, and
       // again to make up for the lower ceiling the translucency channel is now
       // baked at so its new margin gradient survives the byte quantisation.
-      uTrans: { value: 4.1 },
+      // Raised a third time when the term was gated on canopy transmittance:
+      // the gate passes about a sixth of the frame, so the same total glow has
+      // to arrive through fewer leaves, and the point of the exercise is that
+      // those leaves are much brighter than the average was.
+      uTrans: { value: 9.5 },
       uAtlasPx: { value: ATLAS_PX },
       // Half-width in pixels below which thin geometry gets widened.
       uRibMin: { value: 1.15 },

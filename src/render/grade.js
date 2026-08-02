@@ -71,28 +71,43 @@ const MAX_MOTION = 28;
 
 /* The grade itself, as data.
  *
- * The single constraint every one of these numbers is written under: the blue
- * coefficient is at or below the green one in each of the three multiplicative
- * terms, and the only additive term on blue is negative. That is a mechanical
- * guarantee rather than a matter of taste — the warm olive palette this scene
- * has been praised for is a couple of per cent of blue gain away from reading
- * cyan, and a grade is exactly the kind of thing that gets nudged later by
- * someone who does not know that.
+ * Two constraints, and they are not the same constraint.
  *
- * The magnitudes are all small on purpose. The image arriving here is already
- * a good one; the job is to make it look like it went through a camera, and
- * the difference between footage and a render is not a large colour move, it
- * is a set of small ones that are all consistent with the same piece of glass
- * and the same stock.
+ * The first is that every term moves blue *down* relative to green and none of
+ * them moves it up — which for the power term means a larger exponent, since a
+ * larger exponent darkens a value under one. The only additive term on blue is
+ * negative. That is a mechanical guarantee rather than a matter of taste: the
+ * warm olive palette this scene has been praised for is a couple of per cent of
+ * blue gain away from reading cyan, and a grade is exactly the kind of thing
+ * that gets nudged later by someone who does not know that.
+ *
+ * The second was learned the hard way and is the reason these numbers moved.
+ * Warmth has to come out of blue and never out of red. The first version got
+ * half of it by putting red *up* — a slope of 1.018 and an exponent of 0.990 —
+ * which is a perfectly ordinary way to warm an image and is a disaster in this
+ * one, because red rising against green is green falling against red, and the
+ * green channel's lead over the red is the entire signal that a leaf is a leaf.
+ * Measured across the stops it took the sunlit canopy from a lead of 4.9 code
+ * values to 1.7 and the falls from -0.3 to -2.4, which is to say it left a
+ * jungle net red-dominant. It was warm and it was not cyan and it was khaki,
+ * and khaki was the single loudest complaint about the whole project. Red is
+ * therefore pinned at unity in every multiplicative term here and the warmth is
+ * blue's to give up.
+ *
+ * The magnitudes are all small on purpose. The image arriving here is already a
+ * good one; the job is to make it look like it went through a camera, and the
+ * difference between footage and a render is not a large colour move, it is a
+ * set of small ones that are all consistent with the same piece of glass and
+ * the same stock.
  */
 const GRADE = {
-  slope: new THREE.Vector3(1.018, 1.000, 0.978),
+  slope: new THREE.Vector3(1.000, 1.006, 0.966),
   offset: new THREE.Vector3(0.0, 0.0, -0.0008),
-  power: new THREE.Vector3(0.990, 1.000, 1.010),
-  cross: new THREE.Vector2(0.13, 1.8),
+  power: new THREE.Vector3(1.000, 0.994, 1.014),
+  cross: new THREE.Vector2(0.07, 1.8),
   print: new THREE.Vector4(0.014, 0.14, 0.28, 0),
-  shadow: new THREE.Vector3(1.000, 0.996, 0.980),
-  high: new THREE.Vector3(1.000, 0.999, 0.995),
+  shadow: new THREE.Vector3(1.000, 1.000, 0.976),
+  high: new THREE.Vector3(1.000, 1.000, 0.995),
   vignette: 0.13,
 };
 
@@ -529,22 +544,37 @@ void main(){
  * reason for going back up the pyramid rather than reading all six levels at
  * the end. Bilinear magnification of a level a thirty-second of the frame
  * across has visible diamond facets in it, and a gradient with facets in it is
- * exactly what the eye finds. */
+ * exactly what the eye finds.
+ *
+ * The gain is what shapes the point spread function, and it is applied at every
+ * step of the climb, so a level's weight in the final image is the gain raised
+ * to the number of steps it has to make. At 1.30 that puts the widest level of
+ * six at three and a half times the narrowest, which is the difference between
+ * a pyramid that sums to a tight core and one that sums to a veil.
+ *
+ * The first version left it at one and measured as a glow that hugged its
+ * source: an addition of nine hundredths of a code value to the frame's mean,
+ * with only a tenth of a per cent of the frame more than four code values
+ * brighter. That is not restraint, it is absence — a lens whose brightest
+ * region is thirty times the forest around it puts a visible wash across that
+ * forest, and the six-level pyramid built to carry it was contributing nothing
+ * the top two levels had not already done. */
 const BLOOM_UP_FRAG = /* glsl */ `
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D tSrc;
 uniform vec2 uTexel;       // source texel
 uniform float uRadius;
+uniform float uGain;
 
 vec3 t(vec2 o){ return textureLod(tSrc, vUv + o * uTexel * uRadius, 0.0).rgb; }
 
 void main(){
-  gl_FragColor = vec4((t(vec2(-1.0, 1.0)) + t(vec2(1.0, 1.0))
-                     + t(vec2(-1.0,-1.0)) + t(vec2(1.0,-1.0))) * 0.0625
-                    + (t(vec2(0.0, 1.0)) + t(vec2(-1.0, 0.0))
-                     + t(vec2(1.0, 0.0)) + t(vec2(0.0,-1.0))) * 0.125
-                    + t(vec2(0.0, 0.0)) * 0.25, 1.0);
+  gl_FragColor = vec4(((t(vec2(-1.0, 1.0)) + t(vec2(1.0, 1.0))
+                      + t(vec2(-1.0,-1.0)) + t(vec2(1.0,-1.0))) * 0.0625
+                     + (t(vec2(0.0, 1.0)) + t(vec2(-1.0, 0.0))
+                      + t(vec2(1.0, 0.0)) + t(vec2(0.0,-1.0))) * 0.125
+                     + t(vec2(0.0, 0.0)) * 0.25) * uGain, 1.0);
 }
 `;
 
@@ -614,7 +644,16 @@ vec3 stock(vec3 c){
    * because saturation is a property of the surface and brightness just
    * multiplies it. That inversion is a large part of why a render reads as a
    * render, and it is most visible here on the sunlit canopy, where the fully
-   * lit leaves were the most violently green things in the frame. */
+   * lit leaves were the most violently green things in the frame.
+   *
+   * Halved from where it started, because it was the other half of the khaki.
+   * A pull toward luminance is a pull toward grey along every axis at once,
+   * including the green-red axis that says the subject is foliage, and at 0.13
+   * weighted this heavily into the highlights it was taking about a code value
+   * and a half of green lead off exactly the sunlit leaves that should have the
+   * most. Real footage of a warm-graded jungle keeps a large green lead on lit
+   * leaves; the desaturation film does to its highlights is real but it is
+   * smaller than this was, and the leaves are where it is least affordable. */
   /* Measured on the exposed value rather than the scene value, because "a
    * highlight" means a pixel near the top of the *print*, and the scene is
    * two and a half stops below that by construction. Reading it off the raw
@@ -819,24 +858,31 @@ void main(){
    * The amplitude is modulated by a parabola in the encoded value for the
    * usual reason: silver halide grain is visible where some grains have been
    * developed and some have not, so it peaks in the midtones and vanishes in
-   * clear film and in solid black. And it is a shade over one code value at
-   * peak, which is small enough to be deniable — you cannot see it in a still
-   * at a hundred per cent, only in the way it stops the smooth mist gradients
-   * from looking like they were computed.
+   * clear film and in solid black. That curve is a quarter of the amplitude in
+   * deep shadow, its full value across the 102-128 band, and two thirds of it
+   * in the shoulder, which is the shape a measurement of a real stock has.
    *
    * A per-channel component on top of a shared one, because a colour negative
    * has three independently grainy layers, and grain that is purely luminance
    * reads as video noise rather than as film.
    *
-   * The amplitude is set in code values so that it can be argued about, and
-   * it was set by measurement rather than by eye: the high-frequency residual
-   * of a flat patch of mist, which is the only place in this frame with no
-   * detail of its own to hide behind. At the peak of the parabola the noise is
-   * uniform over five code values per channel, which comes out as a luminance
-   * standard deviation of about one — present, and roughly a third of what a
-   * scanned thirty-five millimetre frame carries. The first version was at
-   * 1.15 and measured 0.83 against 0.80 for no grain at all, which is to say
-   * it was quantised away before it reached the file.
+   * The amplitude is set in code values so that it can be argued about, and it
+   * was set by measurement rather than by eye. At the peak of the parabola the
+   * noise is uniform over nine code values per channel, and because half of it
+   * is shared between the channels and half is not, that comes out as a
+   * luminance standard deviation of 1.6 — which is in the range a scanned
+   * thirty-five millimetre frame carries rather than a third of it.
+   *
+   * Three versions of this number, and the arithmetic is worth writing down
+   * because two of them were wrong in ways that were not visible. At 1.15 it
+   * measured 0.83 against 0.80 for no grain at all: quantised away before it
+   * reached the file. At 5.0 the peak sigma is 0.90 and the frame average 0.72,
+   * which is present but is under the threshold at which grain does the one
+   * thing it is here for — this frame is soft, and a soft frame with no grain in
+   * it reads as a render however good the optics above are. The conversion from
+   * amplitude to sigma is 0.180, not 0.289: a uniform variate over nine code
+   * values has a standard deviation of 2.6, and then the luminance of a
+   * half-shared half-independent triple takes 0.625 of that.
    *
    * Half of it is shared between the channels and half is not. All-shared is
    * luminance noise, which is what a sensor makes and not what an emulsion
@@ -1038,7 +1084,8 @@ export class Grade {
     });
     this.upMat = this._mat('up', BLOOM_UP_FRAG, {
       tSrc: { value: null }, uTexel: { value: new THREE.Vector2() },
-      uRadius: { value: 1.0 },
+      uRadius: { value: 1.4 },
+      uGain: { value: 1.30 },
     }, THREE.AdditiveBlending);
     this.finalMat = this._mat('final', FINAL_FRAG, Object.assign({}, shared, {
       tScene: { value: null },
@@ -1053,12 +1100,22 @@ export class Grade {
       /* Small. This is the number the critic's blown-out curtain finding is
        * about, and the pyramid it multiplies is already normalised, so this is
        * roughly the fraction of a bright pixel's energy that the lens throws
-       * elsewhere. Two per cent is a clean lens; ten would be a dirty one and
-       * would haze the frame, which is the failure mode named in the brief. */
-      uBloom: { value: 0.024 },
+       * elsewhere. Four per cent is a clean lens; twenty would be a dirty one
+       * and would haze the frame, which is the failure mode named in the brief.
+       *
+       * It can be raised without endangering the curtain because of where in
+       * the pass it lands. Bloom added after the tone curve is added to a signal
+       * that has already been compressed against white, so it can only push
+       * pixels past it; added before, it is radiance like any other, and the
+       * same ACES shoulder that was holding the curtain under white holds the
+       * curtain plus its glare under white. That is measured rather than
+       * assumed — the standing requirement is zero blown pixels on the falls at
+       * every stop and every tier, and it still reads zero at a threshold of
+       * 245. */
+      uBloom: { value: 0.045 },
       uAberr: { value: new THREE.Vector3(0.0018, 0, 0) },
       uVignette: { value: new THREE.Vector2(0.13, 4.0) },
-      uGrain: { value: new THREE.Vector2(5.0, 0) },
+      uGrain: { value: new THREE.Vector2(9.0, 0) },
       uDebug: { value: 0 },
       uSlope: { value: GRADE.slope.clone() },
       uOffset: { value: GRADE.offset.clone() },
@@ -1193,7 +1250,7 @@ export class Grade {
     fm.uTexel.value.set(1 / t.pw, 1 / t.ph);
     fm.uCoC.value.set(cocScale, this.focus, this.maxFarPx);
     fm.uEnable.value.set(doDof ? 1 : 0, doBloom ? 1 : 0, this.want.grade ? 1 : 0);
-    fm.uGrain.value.x = this.want.grain ? 5.0 : 0;
+    fm.uGrain.value.x = this.want.grain ? 9.0 : 0;
     /* Advanced per frame so the grain moves. A static pattern over a moving
      * image is fixed-pattern sensor noise, which is a different and much more
      * synthetic-looking thing than film grain — and the eye locks onto it
