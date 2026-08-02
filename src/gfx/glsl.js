@@ -241,6 +241,39 @@ vec3 heightToNormal(float hL, float hR, float hD, float hU, float strength){
 }
 `;
 
+/* Turn a screen uv and a depth texture back into a view-space position, and
+ * know when the pixel is sky.
+ *
+ * Every full-screen pass in the render/ directory needs this and they all need
+ * it to agree, because they are layered on top of each other: the volumetric
+ * march, the occlusion term, the depth-of-field circle and the motion vector
+ * are four different readings of the same buffer, and a pass that reconstructs
+ * depth even slightly differently from the one it composites with produces a
+ * one-pixel misregistration at every silhouette — which, in a frame that is
+ * almost entirely silhouette, is a fringe around everything.
+ *
+ * The uniforms are part of the contract. Passes that use this share one
+ * uniform object by reference so that there is exactly one place the depth
+ * texture and the projection are set per frame.
+ */
+export const DEPTH_GLSL = /* glsl */ `
+uniform sampler2D tDepth;
+uniform mat4 uInvProj;
+uniform vec2 uNearFar;
+
+float rawDepth(vec2 uv){ return textureLod(tDepth, uv, 0.0).x; }
+
+// Negative, metres, the way view space runs.
+float viewZ(float d){
+  return (uNearFar.x * uNearFar.y) / ((uNearFar.y - uNearFar.x) * d - uNearFar.y);
+}
+
+vec3 viewPos(vec2 uv, float d){
+  vec4 p = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+  return p.xyz / p.w;
+}
+`;
+
 /* Full-screen triangle. A quad's diagonal seam makes interpolated varyings
  * discontinuous down the middle of the target; one oversized triangle has no
  * seam and rasterises fewer helper pixels. */

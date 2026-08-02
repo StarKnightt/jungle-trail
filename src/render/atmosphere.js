@@ -28,9 +28,10 @@
  * is under two milliseconds.
  */
 import * as THREE from 'three';
-import { FS_VERT } from '../gfx/glsl.js';
+import { FS_VERT, DEPTH_GLSL } from '../gfx/glsl.js';
 import { FIELD_GLSL } from './field.js';
 import { CANOPY_GLSL } from './canopy.js';
+import { Grade } from './grade.js';
 
 /* Resolution scale and march length per tier. The scale is what actually costs
  * money — a step is cheap and there are four times as many pixels at full
@@ -112,26 +113,6 @@ function buildMistNoise(size = 64) {
   tex.needsUpdate = true;
   return tex;
 }
-
-/* Shared by every pass here: turn a screen uv and the depth texture into a
- * view-space position, and know when the pixel is sky. */
-const DEPTH_GLSL = /* glsl */ `
-uniform sampler2D tDepth;
-uniform mat4 uInvProj;
-uniform vec2 uNearFar;
-
-float rawDepth(vec2 uv){ return textureLod(tDepth, uv, 0.0).x; }
-
-// Negative, metres, the way view space runs.
-float viewZ(float d){
-  return (uNearFar.x * uNearFar.y) / ((uNearFar.y - uNearFar.x) * d - uNearFar.y);
-}
-
-vec3 viewPos(vec2 uv, float d){
-  vec4 p = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
-  return p.xyz / p.w;
-}
-`;
 
 const VOLUME_FRAG = /* glsl */ `
 precision highp float;
@@ -551,7 +532,6 @@ uniform sampler2D tScene;
 uniform sampler2D tVolume;
 uniform sampler2D tAO;
 uniform vec2 uHalfTexel;
-uniform float uExposure;
 uniform vec2 uPost;         // volumetric amount, wide occlusion strength
 uniform float uAOMix;       // contact occlusion strength
 uniform float uHasVolume;
@@ -561,36 +541,6 @@ uniform float uHasVolume;
  * the eye reads the silhouettes rather than the gradient — and "the shafts do
  * not lean with the sun" is a claim about the gradient. */
 uniform float uVolDbg;
-
-vec3 RRTAndODTFit(vec3 v){
-  vec3 a = v * (v + 0.0245786) - 0.000090537;
-  vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
-  return a / b;
-}
-
-/* three's own ACES fit, copied rather than referenced.
- *
- * The scene pass no longer tone maps — it writes linear radiance into a
- * half-float target so that in-scattered light can be added to it in the same
- * units — so the curve has to be applied here instead, and it has to be the
- * same curve or every screenshot taken before this change stops being
- * comparable with every one taken after. This is not the grading pass; that is
- * a later system and it will replace this function rather than tuning it. */
-vec3 aces(vec3 c){
-  const mat3 IN = mat3(
-    vec3(0.59719, 0.07600, 0.02840),
-    vec3(0.35458, 0.90834, 0.13383),
-    vec3(0.04823, 0.01566, 0.83777));
-  const mat3 OUT = mat3(
-    vec3( 1.60475, -0.10208, -0.00327),
-    vec3(-0.53108,  1.10813, -0.07276),
-    vec3(-0.07367, -0.00605,  1.07602));
-  c *= uExposure / 0.6;
-  c = IN * c;
-  c = RRTAndODTFit(c);
-  c = OUT * c;
-  return clamp(c, 0.0, 1.0);
-}
 
 void main(){
   vec3 scene = textureLod(tScene, vUv, 0.0).rgb;
@@ -643,23 +593,30 @@ void main(){
   c = mix(c, c * vol.a + vol.rgb * uPost.x, uHasVolume);
 
   if (uVolDbg > 0.5) c = vol.rgb * uPost.x;
+  /* The occlusion view deliberately bypasses everything downstream. Occlusion
+   * is a ratio in nought to one and the tone curve's whole job is to compress
+   * the top of the range, so viewing it through the curve shows a white frame
+   * however strong the term is — which is a good way to conclude a working
+   * pass is doing nothing. render/grade.js honours the same flag and stops
+   * grading when it is set. */
+  if (uVolDbg > 1.5) c = vec3(ao);
 
-  gl_FragColor = vec4(aces(c), 1.0);
-  /* The occlusion view deliberately skips the tone curve. Occlusion is a
-   * ratio in nought to one and the curve's whole job is to compress the top
-   * of the range, so viewing it through the curve shows a white frame however
-   * strong the term is — which is a good way to conclude a working pass is
-   * doing nothing. */
-  if (uVolDbg > 1.5) gl_FragColor = vec4(vec3(ao), 1.0);
-  #include <colorspace_fragment>
-  /* An ordered dither after encoding, not before. Most of this frame lives in
-   * the bottom fifth of the range, where eight bits are about forty levels and
-   * a smooth mist gradient crosses several of them in a few hundred pixels —
-   * which is a visible contour. One bit of noise costs nothing and removes it,
-   * and doing it after the transfer function is what makes the step size the
-   * thing being dithered. */
-  float dth = fract(dot(gl_FragCoord.xy, vec2(0.7548776662, 0.5698402909)));
-  gl_FragColor.rgb += (dth - 0.5) / 255.0;
+  /* Linear radiance out, not a picture.
+   *
+   * The tone map used to be here and is now the last thing render/grade.js
+   * does, for the same reason it moved out of the scene pass in the first
+   * place: light is still being added downstream. Lens glare is light that
+   * did land on the sensor, defocus is light that landed somewhere else on
+   * it, and both have to be in the same linear units as the surface they came
+   * from. Tone mapping first and blurring afterwards is what makes bloom look
+   * like a white smear painted over a photograph — and in this frame it is
+   * specifically what would blow the waterfall, because the curtain is
+   * already near the top of the curve and anything added after the shoulder
+   * has nowhere to go but past white.
+   *
+   * The target is half-float and linear, so there is no encode and no dither
+   * here either; both belong at the end, where the eight bits are. */
+  gl_FragColor = vec4(c, 1.0);
 }
 `;
 
@@ -792,7 +749,6 @@ export class Atmosphere {
         tVolume: { value: null },
         tAO: { value: null },
         uHalfTexel: { value: new THREE.Vector2() },
-        uExposure: { value: 1.48 },
         uPost: { value: new THREE.Vector2(1, 0.55) },
         uAOMix: { value: 0 },
         uHasVolume: { value: 1 },
@@ -800,6 +756,14 @@ export class Atmosphere {
       }),
       depthTest: false, depthWrite: false,
     });
+
+    /* The lens and the film. It is constructed here rather than in main.js
+     * because the two halves of the post chain are one pipeline with one
+     * resolution and one tier, and splitting the ownership would mean two
+     * places that have to be kept in step about the size of a buffer they
+     * share. It takes the depth uniforms by reference for the same reason
+     * every pass in this file does. */
+    this.grade = new Grade(renderer, shared, tier);
 
     this.quad = fullscreen(this.volumeMat);
     this._targets = null;
@@ -844,6 +808,7 @@ export class Atmosphere {
     this.tier = tier;
     this.volumeMat.uniforms.uSteps.value = TIER_POST[tier].steps;
     this.aoMat.uniforms.uTaps.value = TIER_POST[tier].ao;
+    this.grade.setTier(tier);
     if (this._targets) this.setSize(this._targets.pw, this._targets.ph, true);
   }
 
@@ -905,6 +870,7 @@ export class Atmosphere {
     this.compositeMat.uniforms.tScene.value = hdr.texture;
     this.compositeMat.uniforms.tVolume.value = vol.texture;
     this.compositeMat.uniforms.tAO.value = aoB.texture;
+    this.grade.setSize(pw, ph, force);
   }
 
   _free(t) {
@@ -966,10 +932,18 @@ export class Atmosphere {
     cu.uHasVolume.value = hasVolume ? 1 : 0;
     cu.uPost.value.y = hasAO ? this.aoStrength : 0;
     cu.uAOMix.value = hasAO ? this.contactStrength : 0;
-    this._draw(this.compositeMat, null);
+    /* Into the grade's own HDR buffer rather than onto the canvas. This is the
+     * hand-off: everything up to here is radiometry and everything after it is
+     * a camera. */
+    this._draw(this.compositeMat, this.grade.target());
+    /* The volumetric and occlusion debug views are measurements, so the grade
+     * gets out of their way rather than being applied to them. */
+    this.grade.bypass = cu.uVolDbg.value > 0.5;
+    this.grade.finish(camera);
   }
 
   dispose() {
+    this.grade.dispose();
     if (this._targets) this._free(this._targets);
     this.noise.dispose();
     this.quad.geometry.dispose();
