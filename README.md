@@ -66,8 +66,8 @@ clearing, 5 the falls.
 
 ## Performance
 
-7.5 - 8.9 ms per frame on an RTX 4060 at 1600x900 — 134 fps in the corridor at
-498 scene draw calls, 112 fps facing the falls at 241. The game caps itself at
+6.3 - 6.8 ms per frame on an RTX 4060 at 1600x900 — 147 fps in the corridor at
+495 scene draw calls, 157 fps facing the falls at 234. The game caps itself at
 60 fps; there is no reason for a walking-pace scene to render at 300.
 
 The pool's planar reflection is the one pass that is not free: it is a second
