@@ -68,6 +68,26 @@ export class PlanarMirror {
     this.centre = opts.centre || new THREE.Vector3(0, planeY, 0);
     this.radius = opts.radius ?? 16;
     this.range = opts.range ?? 110;
+    /* Rendered every `every` frames rather than every frame, holding the
+     * previous texture in between.
+     *
+     * The pass is a second submission of the whole clearing — two hundred and
+     * forty draw calls and two and a half million triangles — and it is bound
+     * by that submission, not by the pixels it covers, so the half-resolution
+     * target above does not touch its cost. It measured at three and a half
+     * milliseconds of a nine millisecond falls-facing frame: more than a third
+     * of the budget, for the one object in the scene that is allowed to be a
+     * frame stale. The reflection is sampled through a surface whose ripple
+     * displaces it by several texels each frame and it is multiplied by a
+     * Fresnel term; at over a hundred frames a second, alternating means the
+     * image is at worst nine milliseconds behind a camera that walks at one and
+     * a half metres a second, which is two millimetres of parallax.
+     *
+     * Not applied to the first frame the pool is visible, which is the one
+     * frame where there is no previous texture to hold and a capture tool
+     * asking for a single frame would get nothing. */
+    this.every = opts.every ?? 2;
+    this._frame = 0;
 
     /* Layer 0 only, which is what keeps the player's body out of the
      * reflection: the first-person representation is a pair of arms posed for
@@ -135,9 +155,14 @@ export class PlanarMirror {
    *   everything above the plane.
    */
   render(scene, camera, hide = []) {
+    if (!this.enabled || !this.target) { this.active = false; return false; }
+    if (!this._visible(camera)) { this.active = false; this._frame = 0; return false; }
+    /* Held rather than skipped. `active` stays true so the material keeps
+     * sampling the texture that is already there — turning the reflection off
+     * on alternate frames would be a fifty-hertz flicker, which is the one
+     * outcome worse than paying for it. */
+    if (this._frame++ % this.every !== 0) return this.active;
     this.active = false;
-    if (!this.enabled || !this.target) return false;
-    if (!this._visible(camera)) return false;
 
     const r = this.renderer;
 

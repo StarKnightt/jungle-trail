@@ -66,9 +66,16 @@ clearing, 5 the falls.
 
 ## Performance
 
-6.2 - 8.7 ms per frame on an RTX 4060 at 1600x900, at roughly 1,000 draw calls
-and 5.8 - 6.6 M triangles. The game caps itself at 60 fps; there is no reason for
-a walking-pace scene to render at 300.
+7.5 - 8.9 ms per frame on an RTX 4060 at 1600x900 — 134 fps in the corridor at
+498 scene draw calls, 112 fps facing the falls at 241. The game caps itself at
+60 fps; there is no reason for a walking-pace scene to render at 300.
+
+The pool's planar reflection is the one pass that is not free: it is a second
+submission of the whole clearing and it costs about 1.4 ms of a falls-facing
+frame. It is skipped entirely whenever the pool is off screen, which is most of
+the walk, it runs at 36 per cent resolution, it reuses the shadow map the main
+pass is about to use, and it refreshes on alternate frames. Off below the `high`
+tier, where the water falls back to a graded analytic reflection.
 
 ## Techniques
 
@@ -108,8 +115,15 @@ common period and never audibly repeats.
 Honest version: this is not finished.
 
 - **In:** terrain, vegetation, lighting, ruins, character and audio.
-- **Being iterated:** water. It has had three passes and is still the weakest
-  system. A blind critic currently scores it 4/10.
+- **Being iterated:** water. It has had five passes and is still the weakest
+  system. A blind critic scored it 3, then 4, then 5 out of 10 and then ruled
+  the falling curtain itself closed — the remaining gap there is satin instead
+  of droplets, which is a limit of representing a fall as a swept quad sheet
+  rather than something shader tuning can reach. The two passes since that
+  ruling went to everything around the curtain: the churn dome, the plunge
+  basin's foam rafts, a feeding stream above the lip, a visible brook, a real
+  planar reflection in the pool, and readable waterline bands on the masonry.
+  Not yet re-scored.
 - **Not done:** post-processing. No colour grading, no depth of field.
 
 The vegetation and lighting critics signed off at 5/10 and 6/10 respectively, and
