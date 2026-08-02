@@ -114,16 +114,19 @@ common period and never audibly repeats.
 
 Honest version: this is not finished.
 
-- **In:** terrain, vegetation, lighting, ruins, character and audio.
-- **Being iterated:** water. It has had five passes and is still the weakest
-  system. A blind critic scored it 3, then 4, then 5 out of 10 and then ruled
-  the falling curtain itself closed — the remaining gap there is satin instead
-  of droplets, which is a limit of representing a fall as a swept quad sheet
-  rather than something shader tuning can reach. The two passes since that
-  ruling went to everything around the curtain: the churn dome, the plunge
-  basin's foam rafts, a feeding stream above the lip, a visible brook, a real
-  planar reflection in the pool, and readable waterline bands on the masonry.
-  Not yet re-scored.
+- **In:** terrain, vegetation, lighting, ruins, character, audio and water.
+- **Closed at 6/10 after four critic passes:** water. A blind critic scored it
+  3, then 4, then 5, then 6 out of 10 and closed it there. It ruled the falling
+  curtain itself closed after the third pass — the remaining gap there is satin
+  instead of droplets, which is a limit of representing a fall as a swept quad
+  sheet rather than something shader tuning can reach. Work after that ruling
+  went to everything around the curtain: the churn dome, the plunge basin's foam
+  rafts, a feeding stream above the lip, a visible brook, a planar reflection in
+  the pool, readable waterline bands on the masonry, and the tongue at the lip.
+  The impact zone, the worst offender for three passes, is now the best part of
+  the system. What the critic left on the table for a future pass: the brook's
+  banks are still straight, the reflection is soft, the masonry bands do not
+  quite line up between blocks, and the lip crest wants notching.
 - **Not done:** post-processing. No colour grading, no depth of field.
 
 The vegetation and lighting critics signed off at 5/10 and 6/10 respectively, and

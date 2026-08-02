@@ -2044,14 +2044,17 @@ export class Water {
         attribute float aAcross;
         attribute float aCol;
         attribute float aShell;
+        attribute float aCrest;
         varying float vFall;
         varying float vAcross;
         varying float vCol;
         varying float vShell;
+        varying float vCrest;
         varying float vWY;
       ` + sh.vertexShader.replace('#include <begin_vertex>', /* glsl */ `
         #include <begin_vertex>
         vFall = aFall; vAcross = aAcross; vCol = aCol; vShell = aShell;
+        vCrest = aCrest;
         vWY = (modelMatrix * vec4(transformed, 1.0)).y;
       `);
 
@@ -2067,6 +2070,7 @@ export class Water {
         varying float vAcross;
         varying float vCol;
         varying float vShell;
+        varying float vCrest;
         varying float vWY;
         float gAer = 0.0;
         float gRope = 0.0;
@@ -2225,11 +2229,41 @@ export class Water {
           float outer = sstep(0.52, 1.00, abs(vAcross));
           a *= mix(1.0, 0.12 + 0.46 * rope, outer * (0.35 + 0.65 * torn));
 
+          /* The tongue, given the limbs' falloff along its leading edge.
+           *
+           * The four rows above the lip are the water still rolling over the
+           * rock, and every alpha term above is written in fall time — so at
+           * f = 0 the torn, burst and mass mixes all collapse to their
+           * coherent end and the whole crest came out at one flat 0.94. The
+           * mesh ends there, so that flat value ended on the mesh's boundary:
+           * a hard top edge, two square corners where it met the width
+           * feather, and a uniform grey-blue face between them. A slab, which
+           * is what it read as — a fixture with water coming out of it rather
+           * than a stream arriving at an edge.
+           *
+           * The fix is the term the limbs have and the crest did not. Alpha
+           * falls off toward the leading edge through the same rope mask, so
+           * what survives at the boundary is filaments with gaps between them
+           * — the comb of strands a tongue actually breaks into as it thins
+           * over a lip — and what is left inboard is streaked rather than
+           * flat. Nothing here can reach f > 0: vCrest is zero from the lip
+           * down, so the curtain's core opacity is untouched.
+           */
+          float lead = sstep(0.10, 0.95, vCrest);
+          a *= mix(1.0, 0.10 + 0.44 * rope, lead);
+
           // The sheet's own edges. Feathered, because a curtain of water has
           // no edge — it frays into the air, and a straight vertical boundary
           // is the giveaway. Only lightly at the lip, where the flow is still
           // confined by the rock it just left.
-          a *= sstep(1.14, 0.84 - 0.34 * torn, abs(vAcross));
+          /* And harder across the crest, which is what rounds the corners off
+           * the tongue. The geometry there is slightly *wider* than the lip,
+           * so with the sheet's own feather the outermost columns were still
+           * carrying half their alpha out to a square end. Bringing the
+           * feather inboard as the rows go upstream turns the plan of the
+           * tongue into a wedge that narrows into the notch. */
+          a *= sstep(1.14 - 0.26 * vCrest, 0.84 - 0.34 * torn - 0.22 * vCrest,
+                     abs(vAcross));
           // The back face is behind a metre of water and reads accordingly.
           a *= vShell < 0.0 ? 0.72 : 1.0;
 
@@ -2396,6 +2430,10 @@ export class Water {
     const across = new Float32Array(N);
     const col = new Float32Array(N);
     const shell = new Float32Array(N);
+    // 1 on the tongue's leading edge, 0 from the lip down. See the crest
+    // alpha in the fragment shader: fall time cannot express this, because
+    // the rows above the lip all clamp to f = 0.
+    const crest = new Float32Array(N);
     const nrm = new Float32Array(N * 3);
 
     /* Per-column lateral velocity, which is what tears the sheet into ropes.
@@ -2517,6 +2555,7 @@ export class Water {
       // shears with the column it belongs to instead of against it.
       col[k] = tear[i];
       shell[k] = sh;
+      crest[k] = j < CR ? (CR - j) / CR : 0;
       /* The shading normal, taken from the trajectory rather than from the
        * mesh, and this is the fix for the flat rectangular plates in the sheet.
        *
@@ -2587,6 +2626,7 @@ export class Water {
     g.setAttribute('aAcross', new THREE.BufferAttribute(across, 1));
     g.setAttribute('aCol', new THREE.BufferAttribute(col, 1));
     g.setAttribute('aShell', new THREE.BufferAttribute(shell, 1));
+    g.setAttribute('aCrest', new THREE.BufferAttribute(crest, 1));
     g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(N * 2), 2));
     g.setIndex(idx);
