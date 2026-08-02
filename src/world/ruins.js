@@ -1819,8 +1819,15 @@ export function makeStoneMaterial(renderer) {
          * attribute, and it is the same field the terrain shades itself from,
          * so a course cannot be banded unless the ground it stands in is
          * wet. */
+        /* The wetness gate opened up. At 0.30-to-0.75 it was asking for stone
+         * that is already most of the way to saturated, which the courses
+         * standing at the pool's own rim are not — they are at the top of the
+         * damp zone, not in it — so the gate was closing over exactly the
+         * blocks the bands exist for. It still has to be here, because it is
+         * the only thing that tells a block in the basin from a block at the
+         * same absolute height thirty metres up the dry approach. */
         float near = sstep(uWaterR, uWaterR - 4.5, length(vWPosS.xz - uWaterC))
-                   * sstep(0.30, 0.75, vMeta.y);
+                   * sstep(0.14, 0.48, vMeta.y);
         float dy = vWPosS.y - uWaterY;
         // Submerged and just-awash: continuously wet, so algae holds.
         gSub    = near * sstep(0.10, -0.15, dy);
@@ -2095,10 +2102,23 @@ export function makeStoneMaterial(renderer) {
             * two thirds with the macro gate relaxed — that band is what puts a
             * *pale* course above a *dark* one, and a light-over-dark pair is
             * legible at four times the distance either is alone. */
+           /* Second raise, and this one removes a gate rather than turning a
+            * number up.
+            *
+            * The calcite band is the only one of the three with real coverage —
+            * a metre and a bit of stone above the line, against a stain a hand
+            * deep and an algal film that is almost entirely under water and so
+            * almost never drawn. It was multiplied by a threshold on the
+            * block's own macro variation, which cut the one legible band into
+            * patches at the scale of the noise and left the average unchanged.
+            * That is why raising the weights the first time did not show: the
+            * contrast was going into a field that already had that much
+            * contrast in it. The macro term stays as a modulation, so the band
+            * is not a flat decal, but it can no longer erase it. */
            alb = mix(alb, uAlgae * (0.7 + 0.9 * gMacro.y), gSub * 0.95);
-           alb = mix(alb, alb * 0.24, gLine);
+           alb = mix(alb, alb * 0.12, gLine);
            alb = mix(alb, uCalcite,
-                     gSplash * 0.66 * sstep(0.24, 0.68, gMacro.x) * (1.0 - gMoss));
+                     gSplash * 0.88 * (0.55 + 0.45 * gMacro.x) * (1.0 - gMoss));
            // Moss takes the joints on the side that gets the spray, and only
            // there: it is the wettest stone in the complex.
            alb = mix(alb, uMoss * 0.9, gSplash * gMask.r * 0.55);
