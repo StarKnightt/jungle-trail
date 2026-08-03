@@ -79,11 +79,19 @@ the post-processing chain appeared to cost forty microseconds and `ultra`
 rendered faster than `medium`.
 
 Of that frame, the whole post stack — volumetrics, occlusion, grade, bloom,
-defocus and shutter — is 1.9 to 2.0 ms at `high`. The grading system added 0.19
-ms of it standing still and 0.28 ms while the camera moves: bloom 0.13, defocus
-0.07, shutter 0.11 when there is motion to integrate, and the grade, the
-vignette, the aberration and the grain together under 0.03, because they are
-arithmetic inside a pass that has to run anyway.
+defocus and shutter — is 1.9 to 2.0 ms at `high`. The grading chain is 0.22 ms of
+it standing still and 0.28 ms while the camera moves: defocus 0.13, bloom 0.12,
+shutter 0.11 when there is motion to integrate, and the grade, the vignette, the
+aberration and the grain between 0.01 and 0.06 each, because they are arithmetic
+inside a pass that has to run anyway. Those are means of three runs; the spread
+between runs on a single figure is about 0.03, which is why the isolated pass
+timings are quoted rather than a frame-level difference — a quarter of a
+millisecond does not show up reliably against a 9 ms frame that varies by one.
+
+Every tier runs every effect. Defocus and the shutter were `high` and `ultra`
+only in the first version, which meant half the quality ladder was shipping a
+look nobody had reviewed; measured, six defocus taps cost 0.05 ms, and the tiers
+now scale the sampling of each effect rather than its presence.
 
 The pool's planar reflection is the one pass that is not free: it is a second
 submission of the whole clearing and it costs about 1.4 ms of a falls-facing
@@ -129,7 +137,31 @@ focused at 5.5 m, with the sensor size derived from the render's own field of
 view so the two agree. Motion blur has no velocity buffer behind it; it
 reconstructs screen velocity from the depth buffer and the previous frame's
 view-projection, which is exact for everything in this world that is not
-growing.
+growing. The sky needs no special case in that reconstruction and gets none: it
+has no geometry, so the buffer holds the clear value there, the far plane
+unprojects, and under rotation the answer is exactly right. What had made the sky
+the sharpest thing in a fast pan was not the velocity but the weight — far taps
+were rejected on depth alone, and every tap on a sky pixel is far. Rejection is
+now on parallax, which pure rotation puts at zero.
+
+The numbers these were tuned to are all differences of controlled pairs, which is
+to say two frames from one frozen world state with one term switched between
+them. It matters more than it sounds: the predecessor of `tools/fx.mjs` set each
+half of a pair up from scratch, so the two frames were two seconds of falling
+water apart and differencing them measured the waterfall. Grain measures a
+luminance sigma of 1.24 over a frame and 1.60 at the peak of its density curve,
+against 0.88 in deep shadow and 0.82 in the shoulder. Bloom adds 1.17 code values
+to the frame mean at the falls and 8.0 across the top of the curtain, and 0.00 —
+to the last code value — in a dark corner a third of a frame away, which is the
+difference between veiling glare and haze. Defocus removes 42 to 52 per cent of
+the laplacian energy of the near understory, at every tier. The shutter's blur
+grows monotonically to at least 137 degrees a second, where a frame travels 43
+pixels against a sampling limit of 56, and the sky smears with everything else.
+
+Nothing on the walk clips. The largest single channel value in a frame is 241, at
+all seven stops on all four tiers, and the share at or above 245 is 0.000 per
+cent — which is the standing requirement for the waterfall and is met with room to
+spare.
 
 **Audio.** The DSP is pure functions: `Float32Array` in, `Float32Array` out, with
 no Web Audio anywhere in the synthesis path. Only `src/audio/engine.js` touches
@@ -160,9 +192,26 @@ Honest version: this is not finished.
   the system. What the critic left on the table for a future pass: the brook's
   banks are still straight, the reflection is soft, the masonry bands do not
   quite line up between blocks, and the lip crest wants notching.
-- **Built but not yet reviewed:** post-processing. Grade, bloom, depth of field,
-  camera motion blur, grain, chromatic aberration and vignette are all in and
-  measured, and no critic has seen them yet.
+- **Reviewed at 7/10:** post-processing. A blind critic called it the best-built
+  system in the project and the first whose defining quality is restraint rather
+  than effort, scoring the aberration 9 and the vignette, the grade and the
+  near-field defocus 8 each. Its punch list has been worked: the sky no longer
+  sits sharp in a fast pan, the shutter no longer stops getting blurrier at a
+  third of the rate it should, defocus is real on `low` and `medium` instead of
+  being a measured no-op there, the bloom pyramid reaches far enough to be worth
+  having, and the grain is at an amplitude a soft frame can use.
+- **Open, and the largest thing left in the project:** the middle distance.
+  Everything past about eight metres reads as a flat khaki wall. The haze is too
+  thick, the greens have almost no channel separation — the green channel's lead
+  over red in the sunlit canopy is 1.7 code values where footage would have
+  several times that — and there is no backlit leaf translucency, so depth is
+  carried by fog rather than by silhouette layering and occlusion. It is one
+  problem wearing three costumes across the vegetation, lighting and grading
+  systems. It was started and backed out again rather than shipped half checked;
+  the reasoning is in `a8842aa` and in the comment above `GRADE` in
+  `src/render/grade.js`. It should be picked up in the vegetation and lighting
+  materials first, because a grade cannot manufacture channel separation the
+  render did not hand it.
 
 The vegetation and lighting critics signed off at 5/10 and 6/10 respectively, and
 they signed off on diminishing returns rather than on perfection.

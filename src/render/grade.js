@@ -60,10 +60,10 @@ import { FS_VERT, DEPTH_GLSL, SSTEP } from '../gfx/glsl.js';
  * the answer, not whether the answer is there.
  */
 const TIER_GRADE = {
-  low: { bloom: 4, dof: 6, motion: 8 },
-  medium: { bloom: 5, dof: 8, motion: 12 },
-  high: { bloom: 6, dof: 12, motion: 20 },
-  ultra: { bloom: 7, dof: 16, motion: 28 },
+  low: { bloom: 5, dof: 6, motion: 8 },
+  medium: { bloom: 6, dof: 8, motion: 12 },
+  high: { bloom: 8, dof: 12, motion: 20 },
+  ultra: { bloom: 8, dof: 16, motion: 28 },
 };
 
 const MAX_DOF = 16;
@@ -868,22 +868,34 @@ void main(){
    * reads as video noise rather than as film.
    *
    * The amplitude is set in code values so that it can be argued about, and it
-   * was set by measurement rather than by eye. At the peak of the parabola the
-   * noise is uniform over nine code values per channel, and because half of it
-   * is shared between the channels and half is not, that comes out as a
-   * luminance standard deviation of 1.6 — which is in the range a scanned
-   * thirty-five millimetre frame carries rather than a third of it.
+   * is set by measurement rather than by eye. Measured means differenced: a pair
+   * of frames identical in every respect but this term, so the difference is the
+   * noise field itself and its standard deviation is not an estimate. At nine
+   * code values of amplitude that field measures a luminance sigma of 1.60 at the
+   * peak of the parabola, 1.24 averaged over a whole frame, and it holds its
+   * shape against level — 0.88 in deep shadow, 1.60 across the 102-128 band,
+   * 0.84 in the shoulder. A scanned thirty-five millimetre frame is in that
+   * range.
    *
-   * Three versions of this number, and the arithmetic is worth writing down
-   * because two of them were wrong in ways that were not visible. At 1.15 it
-   * measured 0.83 against 0.80 for no grain at all: quantised away before it
-   * reached the file. At 5.0 the peak sigma is 0.90 and the frame average 0.72,
-   * which is present but is under the threshold at which grain does the one
-   * thing it is here for — this frame is soft, and a soft frame with no grain in
-   * it reads as a render however good the optics above are. The conversion from
-   * amplitude to sigma is 0.180, not 0.289: a uniform variate over nine code
-   * values has a standard deviation of 2.6, and then the luminance of a
-   * half-shared half-independent triple takes 0.625 of that.
+   * Three versions of this number and two of them were wrong in ways nothing in
+   * the picture showed. At 1.15 it measured 0.83 against 0.80 for no grain at
+   * all, which is to say it was quantised away before it reached the file. At 5.0
+   * it measured 0.72, and 0.72 is present but under the threshold at which grain
+   * does the one thing it is here for: this frame is soft, softer than the
+   * footage it is aiming at, and a soft frame with no grain in it reads as a
+   * render however good the optics above it are. Of every knob in this file that
+   * was the one with the most left to give.
+   *
+   * The arithmetic checks out and is worth writing down, because the reason to
+   * trust the measurement is that it agrees with a prediction made separately. A
+   * uniform variate on a unit interval has a standard deviation of 0.289, so nine
+   * code values of it is 2.60 per channel; half the field is shared between the
+   * channels and half is independent, and the luminance weights take
+   * sqrt(0.25 + 0.25 * (0.2126^2 + 0.7152^2 + 0.0722^2)) = 0.625 of that. 1.63
+   * predicted against 1.60 measured. What no amount of that arithmetic gives is
+   * the frame average, because that depends on where the picture's levels
+   * actually sit on the parabola, and it is the number the README should quote:
+   * 1.24 here, and it will differ at another stop.
    *
    * Half of it is shared between the channels and half is not. All-shared is
    * luminance noise, which is what a sensor makes and not what an emulsion
@@ -1014,6 +1026,22 @@ export class Grade {
     const half = cfg.dof > 0 ? mk(hw, hh) : null;
     const near = cfg.dof > 0 ? mk(hw, hh) : null;
 
+    /* The chain runs as far down as the frame allows and the count in the tier
+     * table is a ceiling rather than a target: eight levels at 1600x900 stops at
+     * seven, because the eighth would be six pixels by three and a tent over a
+     * target that small is arithmetic on the average brightness of the whole
+     * picture.
+     *
+     * The bottom of the chain is where the veil comes from, and the geometry is
+     * worth being explicit about because this is the change the "widen the upper
+     * mips" note asked for. A tent of 1.4 texels on a twelve-by-seven level
+     * reaches an eighth of the frame in a single hop, so the last two levels are
+     * the only ones that put any light more than a couple of hundred pixels from
+     * where it came from. Cut off at six levels, as this was, the widest reach is
+     * about fifty pixels — and the measured contribution to the forest a third of
+     * a frame away from the waterfall was zero. Not small: zero, to the last code
+     * value. That is a glow hugging its source rather than a lens scattering
+     * light, and it is what the pyramid not being visible in the result meant. */
     const bloom = [];
     for (let i = 0; i < cfg.bloom; i++) {
       const w = pw >> (i + 1), h = ph >> (i + 1);
