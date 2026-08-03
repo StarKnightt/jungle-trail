@@ -249,9 +249,16 @@ export class Walker {
     const wantsJog = mag > 0 && !!(k.ShiftLeft || k.ShiftRight);
     this._paceBlend += ((wantsJog ? 1 : 0) - this._paceBlend) * response(3.8, dt);
     const pace = lerp(WALK_SPEED, JOG_SPEED, this._paceBlend);
+    /* Rotate the input into world space by the camera's own yaw. With the
+     * 'YXZ' order used in _settleCamera, a yaw of theta puts the eye's forward
+     * at (-sin, 0, -cos) and its right at (cos, 0, -sin); composing those with
+     * the key axes below is the same as applying Ry(theta) to (fx, 0, fz).
+     * Applying Ry(-theta) instead agrees only at yaw zero and fully inverts a
+     * quarter turn away, which is what made walking drift off the look
+     * direction the further the player turned from the trailhead. */
     const cos = Math.cos(this.yaw), sin = Math.sin(this.yaw);
-    const wx = fx * cos - fz * sin;
-    const wz = fx * sin + fz * cos;
+    const wx = fx * cos + fz * sin;
+    const wz = -fx * sin + fz * cos;
 
     /* A sidestep and a blind backward step are deliberately shorter than a
      * forward stride. The input was normalised first, so adding a second key
@@ -497,11 +504,16 @@ export class Walker {
     const breathe = Math.sin(nt * 1.35) * 0.0035 * (1 - moving * 0.6);
 
     const cam = this.camera;
+    /* The sway is lateral, so it rides the eye's right axis, (cos, 0, -sin).
+     * Sending it along (cos, 0, sin) mirrored the offset about the world X
+     * axis: harmless at yaw zero, but a quarter turn away it became a forward
+     * and backward surge along the direction of travel instead of a sway
+     * across it, which reads as an unsteady pace rather than a moving head. */
     const cos = Math.cos(this.yaw), sin = Math.sin(this.yaw);
     cam.position.set(
       this.pos.x + bobX * cos,
       this.pos.y + bobY + breathe - this.jumpCrouch * 0.105,
-      this.pos.z + bobX * sin,
+      this.pos.z - bobX * sin,
     );
     cam.rotation.set(0, 0, 0);
     cam.rotation.order = 'YXZ';
