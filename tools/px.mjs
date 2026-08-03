@@ -148,6 +148,38 @@ function diff(a, b, [cx, cy, cw, ch], an, bn) {
               `  p99=${s[(0.99 * n) | 0].toFixed(1)}  range=${s[0].toFixed(0)}..${s[n - 1].toFixed(0)}`);
   console.log(`    |dLuma| >1=${pc(1)}%  >4=${pc(4)}%  >8=${pc(8)}%  >16=${pc(16)}%`);
   console.log(`    dRGB=${(dr / n).toFixed(2)},${(dg / n).toFixed(2)},${(db / n).toFixed(2)}`);
+
+  /* Standard deviation, and then standard deviation bucketed by the level of the
+   * pixel it sits on. This is the pair of numbers a grain claim lives or dies
+   * on, and neither of the ones above can stand in for them: a mean is zero for
+   * anything zero-mean by construction, and a percentile of the absolute value
+   * mixes the effect's own strength with the level dependence that is supposed
+   * to be the point.
+   *
+   * Film grain is not a uniform dither. Its density rises off the toe, peaks
+   * somewhere in the midtones where the largest number of silver crystals are on
+   * the fence about developing, and falls again in the shoulder where nearly all
+   * of them have. A dither that measures the same at every level is a screen
+   * door in front of the picture; the shape below is what makes it read as
+   * stock instead, and it is the reason the amplitude can be raised without the
+   * grain becoming a thing anyone looks at. */
+  const sd = (a) => {
+    if (a.length < 2) return NaN;
+    const m = a.reduce((p, q) => p + q, 0) / a.length;
+    return Math.sqrt(a.reduce((p, q) => p + (q - m) * (q - m), 0) / a.length);
+  };
+  const bins = [[0, 32], [32, 64], [64, 102], [102, 128], [128, 179], [179, 230], [230, 256]];
+  const buck = bins.map(() => []);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = ((cy + y) * b.w + cx + x) * 4;
+      const L = 0.2126 * b.d[i] + 0.7152 * b.d[i + 1] + 0.0722 * b.d[i + 2];
+      const k = bins.findIndex(([lo, hi]) => L >= lo && L < hi);
+      if (k >= 0) buck[k].push(d[y * cw + x]);
+    }
+  }
+  console.log(`    sigma dLuma=${sd(d).toFixed(2)}  by level: ` +
+              bins.map(([lo, hi], k) => `${lo}-${hi - 1}:${sd(buck[k]).toFixed(2)}`).join(' '));
 }
 
 function main() {
@@ -189,6 +221,44 @@ function main() {
   console.log(`  mean rgb=${mr.toFixed(1)},${mg.toFixed(1)},${mb.toFixed(1)}` +
               `  sat=${((mx - mn) / Math.max(1, mx) * 100).toFixed(1)}%` +
               `  warm(r-b)=${(mr - mb).toFixed(1)}  leaf(g-r)=${(mg - mr).toFixed(1)}`);
+
+  /* The highlight tail, which the percentiles above deliberately hide and which
+   * is the one place an outlier is the whole question. Clipping is not a
+   * proportion of a surface, it is a binary property of a pixel: one blown pixel
+   * on a waterfall is a hole in the picture where the water stopped having a
+   * shape. So this reports the largest channel value present and the share at or
+   * above two thresholds — 250 for genuine clipping, and 245 for the band where
+   * the ACES shoulder has flattened enough that the detail has gone whether or
+   * not the encoder has run out of numbers to describe it with. */
+  let top = 0, n250 = 0, n245 = 0;
+  for (const [r, g, b] of px) {
+    const m = Math.max(r, g, b);
+    if (m > top) top = m;
+    if (m >= 250) n250++;
+    if (m >= 245) n245++;
+  }
+  console.log(`  highlight max=${top}  >=250 ${(n250 / px.length * 100).toFixed(3)}%` +
+              `  >=245 ${(n245 / px.length * 100).toFixed(3)}%`);
+
+  /* Laplacian energy, which is the one number that settles an argument about
+   * defocus. "Is this blurred" is not answerable from a mean or a percentile — a
+   * blur preserves both almost exactly — and it is not reliably answerable by
+   * eye at the size a leaf occupies in a 1600-pixel frame. The mean absolute
+   * second difference is: it is proportional to the amount of detail at the
+   * pixel scale and to nothing else, so a pass that claims to soften the near
+   * field either lowers it or does not. */
+  let lap = 0, lapN = 0;
+  for (let y = 1; y < ch - 1; y++) {
+    for (let x = 1; x < cw - 1; x++) {
+      const L = (dx, dy) => {
+        const i = ((cy + y + dy) * img.w + cx + x + dx) * 4;
+        return 0.2126 * img.d[i] + 0.7152 * img.d[i + 1] + 0.0722 * img.d[i + 2];
+      };
+      lap += Math.abs(4 * L(0, 0) - L(-1, 0) - L(1, 0) - L(0, -1) - L(0, 1));
+      lapN++;
+    }
+  }
+  if (lapN) console.log(`  sharpness=${(lap / lapN).toFixed(2)}`);
 
   const other = flag('diff', null);
   if (other) { diff(img, readPng(other), [cx, cy, cw, ch], src, other); return; }

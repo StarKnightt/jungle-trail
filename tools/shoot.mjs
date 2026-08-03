@@ -6,7 +6,7 @@
  * canopy, the narrowing, the first sight of light, the clearing, the falls.
  *
  *   node tools/shoot.mjs [tag] [--t 0.03,0.5] [--w 1600] [--h 900]
- *                        [--sun 38,152] [--cpu] [--yaw 0]
+ *                        [--sun 38,152] [--cpu] [--yaw 0] [--tier high]
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +30,10 @@ const PITCH = +flag('pitch', 0);
  * 1280 wide cannot show. Detail that only exists below this magnification is
  * detail nobody will ever see. */
 const FOV = +flag('fov', 0);
+/* The quality tier, which used to be nailed to `high` here. Half of what the
+ * ladder ships is not `high`, and a requirement written "at every stop and every
+ * tier" cannot be checked by a tool that can only visit one of them. */
+const TIER = flag('tier', 'high');
 
 const outDir = path.join(ROOT, 'shots', tag);
 fs.rmSync(outDir, { recursive: true, force: true });
@@ -41,7 +45,7 @@ fs.mkdirSync(outDir, { recursive: true });
  * the scene and having to remember to edit it back. */
 const JS = flag('js', '');
 
-await run({ width: W, height: H, hash: 'manual&tier=high' }, async ({ page, errs, gl }) => {
+await run({ width: W, height: H, hash: 'manual&tier=' + TIER }, async ({ page, errs, gl }) => {
   await page.evaluate(([el, az, fov, js]) => {
     window.__game.setSun(el, az);
     if (fov) {

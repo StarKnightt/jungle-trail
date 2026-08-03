@@ -74,11 +74,21 @@ async function pairs(page, base, steps, each, shots) {
 
     const prevVP = G._prevVP.clone();
     const prevPos = G._prevPos.clone();
+    const frame = G._frame;
     const out = [];
     for (const [, js] of shots) {
       new Function('g', js)(g);
       G._prevVP.copy(prevVP);
       G._prevPos.copy(prevPos);
+      /* And the grain's frame counter, or the two halves of a pair get different
+       * noise fields. Grain is zero-mean so it does not move a mean, but it has
+       * a standard deviation of about one and a half code values and the
+       * difference of two independent fields has two — which is larger than
+       * several of the effects being measured here over most of the frame, and
+       * unlike a desynchronised waterfall it lands in every percentile of the
+       * delta rather than in one region of it. Half of a differenced pair
+       * reading as noise is how a real measurement gets mistaken for one. */
+      G._frame = frame;
       g.render();
       out.push(g.renderer.domElement.toDataURL('image/png'));
     }
@@ -111,6 +121,30 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=' + tier }, async ({ pa
     ['falls-bloom-only', ALL + 'p.debug = 1;'],
   ]);
 
+  /* The clearing, which is the brightest stop on the walk and therefore the one
+   * that decides whether the veil costs any highlight headroom. The falls are
+   * the subject but they are water in shade with sun on them; this is a canopy
+   * gap with the sky itself in it, and the sky is the only surface in the scene
+   * with no upper bound of its own. If a stronger bloom is going to push
+   * anything into the clip it will be here rather than at the curtain, and the
+   * standing requirement is written about the curtain. */
+  await pairs(page, "g.goTo(0.68); g.warp(2.0);", 0, '', [
+    ['clearing-bloom-on', ALL],
+    ['clearing-bloom-off', 'g.atmos.grade.want.bloom = false;'],
+  ]);
+
+  /* Grain, differenced out of a pair that is identical in every other respect.
+   * Its amplitude is a claim in code values and there is no way to read one off
+   * a frame that has a forest in it — but the difference of these two files *is*
+   * the noise field, so its standard deviation and its shape against level are
+   * then simply measurable rather than asserted. The README carried 1.1 for a
+   * long time on no better basis than the number the shader had been written
+   * against; measured, that build was making 0.72. */
+  await pairs(page, "g.goTo(0.34); g.warp(2.0);", 0, '', [
+    ['grain-on', ALL],
+    ['grain-off', 'g.atmos.grade.want.grain = false;'],
+  ]);
+
   /* A head turn, which is the motion documentary footage is full of and the
    * one a viewer has seen blurred ten thousand times. Walking straight at
    * something is the weakest possible test of camera blur — forward motion
@@ -136,6 +170,28 @@ await run({ width: 1600, height: 900, hash: 'manual&tier=' + tier }, async ({ pa
     ['pan-fast-off', 'g.atmos.grade.want.motion = false;'],
     ['pan-fast-vel', ALL + 'p.debug = 5;'],
   ]);
+
+  /* A rate ladder, because "the blur clamps" is a claim about a curve and not
+   * about a frame. Six rates from a standstill to a whip, each posed from the
+   * same mark and each panning for the same number of frames, so sharpness
+   * against rate is measurable and the point at which it stops falling — if it
+   * stops falling — shows up in the numbers instead of being argued about.
+   *
+   * The velocity debug view goes out alongside each one. It has to, because a
+   * laplacian has a floor: past about twenty pixels of travel there is no detail
+   * left at the pixel scale to destroy, so sharpness flattens whether or not the
+   * blur is still growing, and the two cases are indistinguishable from the
+   * frame alone. Read the green channel of the debug view for the answer — it is
+   * the clamp binding, it is binary, and it is the only readout here that
+   * survives the tone curve intact. */
+  for (const deg of [0, 7, 17, 34, 69, 137]) {
+    const n = String(deg).padStart(3, '0');
+    await pairs(page, ...at(0.34, deg), [
+      [`rate${n}-on`, ALL],
+      [`rate${n}-off`, 'g.atmos.grade.want.motion = false;'],
+      [`rate${n}-vel`, ALL + 'p.debug = 5;'],
+    ]);
+  }
 
   /* The sky, panned. A canopy gap is the brightest thing in the frame and the
    * one element with no depth, so it is where a velocity reconstructed from the
