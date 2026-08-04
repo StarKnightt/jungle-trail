@@ -7,6 +7,9 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05070a; }
+  /* The canvas is the entire experience — no HUD, nothing that would remind
+     you it is a program. What follows dresses the debug overlay, which is not
+     in the document at all until F3 asks for it. */
   #view { display: block; width: 100vw; height: 100vh; }
   #boot {
     position: fixed; inset: 0; display: grid; place-items: center;

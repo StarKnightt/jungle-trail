@@ -39,10 +39,12 @@ Playwright. The game itself does not need it.
 | Shift | Sprint |
 | Space | Jump |
 | 1 - 5 | Teleport along the trail |
-| F3 | Expand or collapse the debug overlay |
+| F3 | Show or hide the debug overlay |
 
 The teleport keys are 1 trailhead, 2 mid trail, 3 ruins approach, 4 temple
-clearing, 5 the falls.
+clearing, 5 the falls. The debug overlay is hidden on load and stays out of the
+document until F3 puts it there; once it is up, its header collapses it to a
+summary bar and F3 takes it away again.
 
 ![Mid trail](media/02-mid-trail.jpg)
 

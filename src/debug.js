@@ -35,9 +35,14 @@ function gpuDetails(renderer) {
   };
 }
 
+/* The canvas is the entire experience, so nothing here reaches the document
+ * until it is asked for: the overlay is built detached, F3 attaches it, and F3
+ * again takes it back out along with its sampling timer. Once it is up the
+ * header collapses it to the summary bar without hiding it. */
 export class DebugOverlay {
   constructor(game) {
     this.game = game;
+    this.visible = false;
     this.expanded = true;
     this.rows = new Map();
     this.gpu = gpuDetails(game.renderer);
@@ -51,7 +56,7 @@ export class DebugOverlay {
     header.className = 'debug-overlay__header';
     header.type = 'button';
     header.setAttribute('aria-expanded', 'true');
-    header.title = 'Collapse debug overlay (F3)';
+    header.title = 'Collapse debug overlay';
 
     const title = document.createElement('span');
     title.className = 'debug-overlay__title';
@@ -89,20 +94,17 @@ export class DebugOverlay {
     ]);
 
     this.root.append(header, this.body);
-    document.body.append(this.root);
 
+    this._timer = 0;
     this._toggle = () => this.setExpanded(!this.expanded);
     this._key = (event) => {
       if (event.code !== 'F3') return;
       event.preventDefault();
-      this._toggle();
+      this.setVisible(!this.visible);
     };
     header.addEventListener('click', this._toggle);
     window.addEventListener('keydown', this._key);
     this.header = header;
-
-    this.update();
-    this._timer = window.setInterval(() => this.update(), 250);
   }
 
   addSection(title, rows) {
@@ -127,11 +129,25 @@ export class DebugOverlay {
     this.body.append(section);
   }
 
+  setVisible(visible) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    if (visible) {
+      document.body.append(this.root);
+      this.update();
+      this._timer = window.setInterval(() => this.update(), 250);
+      return;
+    }
+    clearInterval(this._timer);
+    this._timer = 0;
+    this.root.remove();
+  }
+
   setExpanded(expanded) {
     this.expanded = expanded;
     this.root.classList.toggle('is-collapsed', !expanded);
     this.header.setAttribute('aria-expanded', String(expanded));
-    this.header.title = `${expanded ? 'Collapse' : 'Expand'} debug overlay (F3)`;
+    this.header.title = `${expanded ? 'Collapse' : 'Expand'} debug overlay`;
     this.chevron.textContent = expanded ? '−' : '+';
   }
 
