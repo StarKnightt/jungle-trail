@@ -22,6 +22,7 @@ import { buildWorldField } from './render/field.js';
 import { Canopy, patchCanopyLight } from './render/canopy.js';
 import { Atmosphere } from './render/atmosphere.js';
 import { Ambience } from './audio/engine.js';
+import { DebugOverlay } from './debug.js';
 
 /* Quality tiers.
  *
@@ -46,6 +47,7 @@ class Game {
     this.paused = false;
     this.running = false;
     this.fps = 0;
+    this.frameMs = 0;
     this._acc = 0;
     this._frames = 0;
     this._fpsT = 0;
@@ -491,8 +493,11 @@ class Game {
       const step = this._acc;
       this._acc = 0;
 
+      const frameStart = performance.now();
       this.step(step);
       this.render();
+      const frameMs = performance.now() - frameStart;
+      this.frameMs += (frameMs - this.frameMs) * (this.frameMs ? 0.12 : 1);
 
       this._frames++;
       this._fpsT += step;
@@ -594,6 +599,7 @@ class Game {
     this.body.dispose();
     this.atmos?.dispose();
     this.canopy?.dispose();
+    this.debug?.dispose();
     this.renderer.dispose();
   }
 }
@@ -603,6 +609,7 @@ const _size = new THREE.Vector2();
 const game = new Game(document.getElementById('view'));
 window.__game = game;
 window.THREE = THREE;
+game.debug = new DebugOverlay(game);
 
 /* Recording convenience: number keys jump to the authored viewpoints.
  *

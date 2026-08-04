@@ -7,14 +7,104 @@
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #05070a; }
-  /* The canvas is the entire experience — no HUD, no overlay, nothing that
-     would remind you it is a program. */
   #view { display: block; width: 100vw; height: 100vh; }
   #boot {
     position: fixed; inset: 0; display: grid; place-items: center;
     font: 300 13px/1.7 ui-sans-serif, system-ui, sans-serif;
     letter-spacing: .22em; text-transform: uppercase; color: #6d7a63;
     background: #05070a; pointer-events: none;
+  }
+  .debug-overlay {
+    position: fixed;
+    z-index: 10;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    width: min(330px, calc(100vw - 24px));
+    color: #d8e4d1;
+    border: 1px solid rgba(184, 215, 171, .2);
+    border-radius: 10px;
+    background: rgba(7, 12, 9, .86);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+    backdrop-filter: blur(14px) saturate(.8);
+    font: 500 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow: hidden;
+    user-select: none;
+  }
+  .debug-overlay__header {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    color: inherit;
+    border: 0;
+    background: rgba(149, 190, 133, .07);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .debug-overlay__header:hover { background: rgba(149, 190, 133, .13); }
+  .debug-overlay__header:focus-visible {
+    outline: 2px solid #9ac68a;
+    outline-offset: -2px;
+  }
+  .debug-overlay__title {
+    color: #a9d398;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+  }
+  .debug-overlay__summary {
+    color: #f0f6ed;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .debug-overlay__chevron {
+    width: 16px;
+    color: #82927d;
+    font-size: 16px;
+    line-height: 1;
+    text-align: center;
+  }
+  .debug-overlay__body { padding: 3px 12px 10px; }
+  .debug-overlay__section {
+    padding: 9px 0 5px;
+    border-top: 1px solid rgba(184, 215, 171, .1);
+  }
+  .debug-overlay__section:first-child { border-top: 0; }
+  .debug-overlay__section h2 {
+    margin: 0 0 6px;
+    color: #70806b;
+    font: inherit;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+  .debug-overlay__row {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr);
+    gap: 10px;
+    padding: 2px 0;
+  }
+  .debug-overlay__row > span { color: #869381; }
+  .debug-overlay__row output {
+    min-width: 0;
+    color: #d8e4d1;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .debug-overlay.is-collapsed { width: 148px; }
+  .debug-overlay.is-collapsed .debug-overlay__body { display: none; }
+  @media (max-width: 520px) {
+    .debug-overlay { top: 8px; right: 8px; width: calc(100vw - 16px); }
+    .debug-overlay.is-collapsed { width: 148px; }
   }
 </style>
 <script type="importmap">

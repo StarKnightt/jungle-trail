@@ -39,6 +39,7 @@ Playwright. The game itself does not need it.
 | Shift | Sprint |
 | Space | Jump |
 | 1 - 5 | Teleport along the trail |
+| F3 | Expand or collapse the debug overlay |
 
 The teleport keys are 1 trailhead, 2 mid trail, 3 ruins approach, 4 temple
 clearing, 5 the falls.
