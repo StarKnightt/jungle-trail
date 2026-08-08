@@ -109,6 +109,155 @@
     .debug-overlay { top: 8px; right: 8px; width: calc(100vw - 16px); }
     .debug-overlay.is-collapsed { width: 148px; }
   }
+
+  /* Below here is the phone: the capability screen shown before the scene is
+     built, and the two touch controls. Neither reaches a desktop — the modules
+     that build them are dynamically imported and a mouse never triggers the
+     import — so what follows is about two kilobytes of rules a desktop
+     downloads and never applies, which is the same bargain the overlay above
+     already makes. */
+  @media (pointer: coarse) {
+    html, body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+    /* The dynamic unit, because a mobile browser's 100vh is the height it has
+       with the address bar hidden and the canvas is sized from innerHeight,
+       which is the height it actually has. The 100vh above stays as the
+       fallback for anything too old to know dvh. */
+    #view { height: 100dvh; touch-action: none; user-select: none; -webkit-user-select: none; }
+  }
+  .gate {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    /* Declared twice on purpose. A centred grid item that is taller than its
+       container overflows equally in both directions, and the half above the
+       top edge cannot be scrolled back to; `safe` falls back to start
+       alignment exactly then. Anything too old to parse the keyword keeps the
+       line above it, which is the behaviour this had before. */
+    place-items: safe center;
+    overflow-y: auto;
+    touch-action: pan-y;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    background: radial-gradient(130% 80% at 50% 0%, #0c1411, #05070a 68%);
+    color: #d8e4d1;
+    font: 400 15px/1.62 ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    transition: opacity .4s ease;
+  }
+  .gate.is-leaving { opacity: 0; pointer-events: none; }
+  .gate__card {
+    width: min(460px, 100%);
+    border: 1px solid rgba(184, 215, 171, .16);
+    border-radius: 14px;
+    background: rgba(7, 12, 9, .72);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+    overflow: hidden;
+  }
+  .gate__still { display: block; width: 100%; height: auto; }
+  .gate__body { padding: 18px 20px 22px; }
+  .gate__kicker {
+    margin: 0;
+    color: #7f8f77;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+  }
+  .gate__title {
+    margin: 5px 0 13px;
+    color: #f0f6ed;
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.15;
+  }
+  .gate__lede { margin: 0 0 12px; color: #a4b39e; font-size: 14px; }
+  .gate__keys {
+    margin: 17px 0 20px;
+    padding: 13px 0 3px;
+    border-top: 1px solid rgba(184, 215, 171, .12);
+  }
+  .gate__key {
+    display: grid;
+    grid-template-columns: 122px minmax(0, 1fr);
+    gap: 12px;
+    padding: 3px 0;
+    font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .gate__key dt { color: #a9d398; }
+  .gate__key dd { margin: 0; color: #869381; }
+  .gate__enter {
+    display: block;
+    width: 100%;
+    min-height: 52px;
+    padding: 0 18px;
+    color: #0a1109;
+    border: 0;
+    border-radius: 10px;
+    background: #9ac68a;
+    font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .gate__enter:active { background: #85b476; }
+  .gate__enter:focus-visible { outline: 2px solid #d8e4d1; outline-offset: 2px; }
+  .gate__note { margin: 13px 0 0; color: #6d7a63; font-size: 12px; text-align: center; }
+  .gate__building {
+    margin: 0;
+    padding: 30px 0;
+    color: #a9d398;
+    text-align: center;
+    font: 500 12px/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    animation: gate-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes gate-pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .gate { transition: none; }
+    .gate__building { animation: none; opacity: 1; }
+  }
+  .touch {
+    position: fixed;
+    z-index: 5;
+    left: max(18px, env(safe-area-inset-left));
+    bottom: max(22px, env(safe-area-inset-bottom));
+    /* Only the pad takes input. Everything else on the screen stays a surface
+       you can drag to look, which is the whole point of there being one
+       control rather than two. */
+    pointer-events: none;
+  }
+  .touch__walk {
+    display: grid;
+    place-items: center;
+    width: 84px;
+    height: 84px;
+    padding: 0;
+    color: rgba(232, 243, 226, .62);
+    border: 1px solid rgba(232, 243, 226, .26);
+    border-radius: 50%;
+    background: rgba(10, 16, 12, .22);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    pointer-events: auto;
+    touch-action: none;
+    transition: background .12s ease, border-color .12s ease, transform .12s ease;
+  }
+  .touch__walk.is-down {
+    color: #eaf6e4;
+    border-color: rgba(200, 230, 190, .5);
+    background: rgba(154, 198, 138, .26);
+    transform: scale(.955);
+  }
+  .touch__arrow {
+    width: 17px;
+    height: 17px;
+    border-top: 2px solid currentColor;
+    border-right: 2px solid currentColor;
+    transform: translateY(3px) rotate(-45deg);
+  }
 </style>
 <script type="importmap">
 {

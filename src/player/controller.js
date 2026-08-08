@@ -88,6 +88,11 @@ export class Walker {
 
     this.keys = Object.create(null);
     this.enabled = false;
+    /* Cleared by the touch controls, and by nothing else. iOS has no Pointer
+     * Lock API and Android rejects the request when the gesture behind it was
+     * a touch, so on a phone the click handler below is at best a no-op and at
+     * worst a rejected promise nobody is holding. */
+    this.pointerLock = true;
     this.auto = null;          // { t } — scripted walk, used by the capture harness
     this.noise = new Noise2D(4242);
     this._time = 0;
@@ -147,7 +152,10 @@ export class Walker {
       this._jumpQueued = false;
     };
     const click = () => {
-      if (document.pointerLockElement !== dom) dom.requestPointerLock();
+      if (!this.pointerLock || document.pointerLockElement === dom) return;
+      const request = dom.requestPointerLock();
+      // Newer Chromium returns a promise here and older ones return nothing.
+      if (request && request.catch) request.catch(() => {});
     };
     const lock = () => {
       this.enabled = document.pointerLockElement === dom;

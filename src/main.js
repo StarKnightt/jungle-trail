@@ -23,6 +23,7 @@ import { Canopy, patchCanopyLight } from './render/canopy.js';
 import { Atmosphere } from './render/atmosphere.js';
 import { Ambience } from './audio/engine.js';
 import { DebugOverlay } from './debug.js';
+import { gateRequired, isTouchPrimary } from './mobile/detect.js';
 
 /* Quality tiers.
  *
@@ -606,11 +607,6 @@ class Game {
 
 const _size = new THREE.Vector2();
 
-const game = new Game(document.getElementById('view'));
-window.__game = game;
-window.THREE = THREE;
-game.debug = new DebugOverlay(game);
-
 /* Recording convenience: number keys jump to the authored viewpoints.
  *
  * The falls are eight minutes of walking from the trailhead, which is the
@@ -624,19 +620,59 @@ game.debug = new DebugOverlay(game);
  * block for a public build; the feature is nowhere else.
  */
 const WARP_STOPS = [0.04, 0.34, 0.81, 0.88, 0.96];
-addEventListener('keydown', (e) => {
-  /* Only while the pointer is locked. A digit typed at a page that merely has
-   * focus is not a request to move the player, and gating on the same flag the
-   * walker uses means the capture harness — which drives goTo() directly and
-   * never sends key events — cannot be perturbed by this at all. */
-  if (!game.walker.enabled) return;
-  const key = /^Digit([1-9])$/.exec(e.code);
-  const t = key && WARP_STOPS[+key[1] - 1];
-  if (t === undefined || t === null) return;
-  game.goTo(t);
-});
 
-// The harness calls begin() itself so it can set state before the first frame.
-if (!/(^|[#&])manual(&|$)/.test(location.hash)) game.begin();
+function boot() {
+  const game = new Game(document.getElementById('view'));
+  window.__game = game;
+  window.THREE = THREE;
+  game.debug = new DebugOverlay(game);
 
-document.getElementById('boot')?.remove();
+  addEventListener('keydown', (e) => {
+    /* Only while the pointer is locked. A digit typed at a page that merely
+     * has focus is not a request to move the player, and gating on the same
+     * flag the walker uses means the capture harness — which drives goTo()
+     * directly and never sends key events — cannot be perturbed by this. */
+    if (!game.walker.enabled) return;
+    const key = /^Digit([1-9])$/.exec(e.code);
+    const t = key && WARP_STOPS[+key[1] - 1];
+    if (t === undefined || t === null) return;
+    game.goTo(t);
+  });
+
+  /* Dynamically imported, so a desktop never fetches the file at all. There is
+   * no keyboard and no pointer lock on a phone, and without this the player
+   * arrives somewhere they cannot move. */
+  if (isTouchPrimary()) {
+    import('./mobile/touch.js')
+      .then(({ attachTouchControls }) => attachTouchControls(game))
+      .catch((err) => console.warn('[mobile] touch controls unavailable:', err));
+  }
+
+  // The harness calls begin() itself so it can set state before the first frame.
+  if (!/(^|[#&])manual(&|$)/.test(location.hash)) game.begin();
+
+  document.getElementById('boot')?.remove();
+  return game;
+}
+
+/* The gate is a phone-and-small-viewport path and nothing else. On a desktop
+ * `gateRequired()` is false, the import below never runs, and the document is
+ * byte for byte the one this file produced before any of it existed.
+ *
+ * Note what is *not* here: no quality tier for the gated path, no effects
+ * turned off, no thinner canopy. A phone that can draw this gets the same
+ * frame a desktop gets, and one that cannot is told so rather than shown
+ * something worse.
+ */
+if (gateRequired()) {
+  import('./mobile/gate.js').then(async ({ presentGate }) => {
+    const dismiss = await presentGate();
+    const game = boot();
+    // One frame before the screen goes, so the fade uncovers the jungle
+    // rather than an empty canvas.
+    game.renderOnce();
+    dismiss();
+  });
+} else {
+  boot();
+}
