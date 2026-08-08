@@ -113,7 +113,13 @@ export async function capture(page, file) {
 /**
  * Boot server + browser + page, run `body`, and guarantee teardown.
  *
- * @param {{width?:number,height?:number,hash?:string,cpu?:boolean,timeout?:number,url?:string}} opts
+ * `device` is handed straight to Playwright's newPage. It exists for the one
+ * question a desktop viewport cannot answer — what a phone gets — and it is
+ * emulation, not a phone: it moves the user agent, the touch flags and the
+ * device pixel ratio, and it changes nothing at all about the GPU underneath.
+ *
+ * @param {{width?:number,height?:number,hash?:string,cpu?:boolean,timeout?:number,
+ *          url?:string,device?:object,autoBegin?:boolean}} opts
  * @param {(ctx:{page:any,url:string,errs:string[],gl:object}) => Promise<void>} body
  */
 export async function run(opts, body) {
@@ -122,6 +128,8 @@ export async function run(opts, body) {
     cpu = process.argv.includes('--cpu'),
     timeout = 180_000,
     url: externalUrl = process.env.JUNGLE_URL || null,
+    device = null,
+    autoBegin = true,
   } = opts || {};
 
   const bad = check();
@@ -148,7 +156,9 @@ export async function run(opts, body) {
   const errs = [];
   let code = 0, gl = null;
   try {
-    const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+    const page = await browser.newPage({
+      viewport: { width, height }, deviceScaleFactor: 1, ...(device || {}),
+    });
     page.on('pageerror', e => errs.push('[pageerror] ' + (e.stack || e.message || e)));
     page.on('console', m => { if (m.type() === 'error') errs.push('[console] ' + m.text()); });
     page.on('requestfailed', r => errs.push('[netfail] ' + r.url().slice(0, 120)));
@@ -162,16 +172,22 @@ export async function run(opts, body) {
     /* Poll `errs` rather than listening for the next 'pageerror': a module
      * that fails to parse throws during goto(), so by the time a fresh
      * listener is attached the only event has already been and gone. */
-    await Promise.race([
-      page.waitForFunction(() => !!window.__game, null, { timeout }),
-      (async () => {
-        for (let i = 0; i < timeout / 250; i++) {
-          await new Promise(r => setTimeout(r, 250));
-          const fatal = errs.find(e => e.startsWith('[pageerror]') || e.startsWith('[crash]'));
-          if (fatal) throw new Error('page threw during boot: ' + fatal.slice(0, 300));
-        }
-      })(),
-    ]);
+    /* Skippable, because there is now a path on which no game is built until
+     * something taps: the mobile gate holds the boot behind a button, so a
+     * tool that wants to look at that screen has to be allowed past here
+     * without a `__game` that is deliberately not there yet. */
+    if (autoBegin) {
+      await Promise.race([
+        page.waitForFunction(() => !!window.__game, null, { timeout }),
+        (async () => {
+          for (let i = 0; i < timeout / 250; i++) {
+            await new Promise(r => setTimeout(r, 250));
+            const fatal = errs.find(e => e.startsWith('[pageerror]') || e.startsWith('[crash]'));
+            if (fatal) throw new Error('page threw during boot: ' + fatal.slice(0, 300));
+          }
+        })(),
+      ]);
+    }
 
     gl = await page.evaluate(() => {
       const c = document.createElement('canvas');
@@ -185,7 +201,7 @@ export async function run(opts, body) {
     const soft = /swiftshader|software|llvmpipe/i.test(gl.renderer);
     console.log(`   adapter: ${gl.renderer}${soft ? '  (SOFTWARE — CPU bound)' : ''}`);
 
-    await page.evaluate(() => window.__game.begin());
+    if (autoBegin) await page.evaluate(() => window.__game.begin());
     await body({ page, url, errs, gl });
   } catch (err) {
     console.error('\n✗ probe failed:', (err && err.message) || err);
