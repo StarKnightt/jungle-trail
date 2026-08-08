@@ -7,9 +7,19 @@ files, no models, no audio recordings and no material libraries: the leaf atlas,
 the bark, the ground, the stone, the character's skin and all sixty audio buffers
 are computed at load time.
 
-Live: **https://starknightt.github.io/jungle-trail/**
+![Nine seconds along the trail: the canopy corridor, the ruins, the falls](media/reel.webp)
 
-![Trailhead under closed canopy](media/01-trailhead.jpg)
+*Captured from the running build with `tools/reel.mjs`, one simulated frame at a
+time. Nothing in it is composited and nothing in it is a cut-away.*
+
+**Walk it: https://starknightt.github.io/jungle-trail/**
+
+**Read the brief it was built from: [PROMPT.md](PROMPT.md).** One page, unedited,
+and most of the story of how this exists at all.
+
+It wants a desktop GPU. A phone is told so before the scene is built and can go
+in anyway; there is no reduced-quality mobile version, because the quality is
+the point of the thing.
 
 ## Running it locally
 
@@ -29,6 +39,8 @@ need a real origin.
 `npm install` is only needed for the capture tools in `tools/`, which use
 Playwright. The game itself does not need it.
 
+![Trailhead under closed canopy](media/01-trailhead.jpg)
+
 ## Controls
 
 | Input | Action |
@@ -46,11 +58,17 @@ clearing, 5 the falls. The debug overlay is hidden on load and stays out of the
 document until F3 puts it there; once it is up, its header collapses it to a
 summary bar and F3 takes it away again.
 
+On a touch device there is no keyboard and no pointer lock, so there are two
+controls instead: drag anywhere to look, and hold the pad in the corner to walk.
+They exist nowhere else. On a desktop the document is a canvas and a script tag,
+and that is the whole of it.
+
 ![Mid trail](media/02-mid-trail.jpg)
 
 ## What is in it
 
-- ~12,000 lines of hand-written code across 51 files.
+- ~12,000 lines of hand-written code across 43 files in `src/`, comments and
+  blank lines aside.
 - A 423.8 m trail across a 180 x 492 m world, from a 361 x 985 heightfield
   sampled every 0.5 m.
 - 100,799 individual plants across 16 species, all built from two primitives: a
@@ -69,9 +87,12 @@ summary bar and F3 takes it away again.
 
 ## Performance
 
-8.9 - 9.3 ms per frame on an RTX 4060 at 1600x900 — 108 fps in the corridor at
-495 scene draw calls, 113 fps facing the falls at 234. The game caps itself at
-60 fps; there is no reason for a walking-pace scene to render at 300.
+9 to 10 ms per frame on an RTX 4060 at 1600x900 on the `high` tier. The two ends
+of that are 8.5 ms facing the falls, where 234 scene draw calls cover the screen
+in water and stone, and 11.0 ms in the canopy corridor, where 495 calls put 6.6
+million triangles of leaf card in front of the camera. The game caps itself at
+60 fps; there is no reason for a walking-pace scene to render at 300, and the
+frame rate is therefore not the measurement -- the millisecond is.
 
 Those numbers are higher than the ones this file used to quote, and the frame
 did not get slower. `glFinish` in a page does not wait for the GPU: Chromium
@@ -81,14 +102,14 @@ once the queue has been handed over. The tools now synchronise on a one-pixel
 the post-processing chain appeared to cost forty microseconds and `ultra`
 rendered faster than `medium`.
 
-Of that frame, the whole post stack — volumetrics, occlusion, grade, bloom,
-defocus and shutter — is 1.9 to 2.0 ms at `high`. The grading chain is 0.22 ms of
+Of that frame, the whole post stack -- volumetrics, occlusion, grade, bloom,
+defocus and shutter -- is 1.9 to 2.0 ms at `high`. The grading chain is 0.22 ms of
 it standing still and 0.28 ms while the camera moves: defocus 0.13, bloom 0.12,
 shutter 0.11 when there is motion to integrate, and the grade, the vignette, the
 aberration and the grain between 0.01 and 0.06 each, because they are arithmetic
 inside a pass that has to run anyway. Those are means of three runs; the spread
 between runs on a single figure is about 0.03, which is why the isolated pass
-timings are quoted rather than a frame-level difference — a quarter of a
+timings are quoted rather than a frame-level difference -- a quarter of a
 millisecond does not show up reliably against a 9 ms frame that varies by one.
 
 Every tier runs every effect. Defocus and the shutter were `high` and `ultra`
@@ -127,7 +148,7 @@ to resolve a hundred thousand leaf cards in a depth buffer.
 
 **Post-processing.** The scene is never tone mapped more than once, and the tone
 map is the last thing that happens rather than the first. Everything that adds
-or moves light — in-scattered mist, lens glare, defocus, the shutter — happens
+or moves light -- in-scattered mist, lens glare, defocus, the shutter -- happens
 in linear HDR before the curve, because all of it is radiance. The grade sits on
 both sides of the curve: channel crosstalk and an ASC slope/offset/power on the
 linear side, where a film stock's response lives, and the toe, the midtone
@@ -143,7 +164,7 @@ view-projection, which is exact for everything in this world that is not
 growing. The sky needs no special case in that reconstruction and gets none: it
 has no geometry, so the buffer holds the clear value there, the far plane
 unprojects, and under rotation the answer is exactly right. What had made the sky
-the sharpest thing in a fast pan was not the velocity but the weight — far taps
+the sharpest thing in a fast pan was not the velocity but the weight -- far taps
 were rejected on depth alone, and every tap on a sky pixel is far. Rejection is
 now on parallax, which pure rotation puts at zero.
 
@@ -154,8 +175,8 @@ half of a pair up from scratch, so the two frames were two seconds of falling
 water apart and differencing them measured the waterfall. Grain measures a
 luminance sigma of 1.24 over a frame and 1.60 at the peak of its density curve,
 against 0.88 in deep shadow and 0.82 in the shoulder. Bloom adds 1.17 code values
-to the frame mean at the falls and 8.0 across the top of the curtain, and 0.00 —
-to the last code value — in a dark corner a third of a frame away, which is the
+to the frame mean at the falls and 8.0 across the top of the curtain, and 0.00 --
+to the last code value -- in a dark corner a third of a frame away, which is the
 difference between veiling glare and haze. Defocus removes 42 to 52 per cent of
 the laplacian energy of the near understory, at every tier. The shutter's blur
 grows monotonically to at least 137 degrees a second, where a frame travels 43
@@ -163,7 +184,7 @@ pixels against a sampling limit of 56, and the sky smears with everything else.
 
 Nothing on the walk clips. The largest single channel value in a frame is 241, at
 all seven stops on all four tiers, and the share at or above 245 is 0.000 per
-cent — which is the standing requirement for the waterfall and is met with room to
+cent -- which is the standing requirement for the waterfall and is met with room to
 spare.
 
 **Audio.** The DSP is pure functions: `Float32Array` in, `Float32Array` out, with
@@ -185,7 +206,7 @@ Honest version: this is not finished.
   post-processing.
 - **Closed at 6/10 after four critic passes:** water. A blind critic scored it
   3, then 4, then 5, then 6 out of 10 and closed it there. It ruled the falling
-  curtain itself closed after the third pass — the remaining gap there is satin
+  curtain itself closed after the third pass -- the remaining gap there is satin
   instead of droplets, which is a limit of representing a fall as a swept quad
   sheet rather than something shader tuning can reach. Work after that ruling
   went to everything around the curtain: the churn dome, the plunge basin's foam
@@ -205,9 +226,9 @@ Honest version: this is not finished.
   having, and the grain is at an amplitude a soft frame can use.
 - **Open, and the largest thing left in the project:** the middle distance.
   Everything past about eight metres reads as a flat khaki wall. The haze is too
-  thick, the greens have almost no channel separation — the green channel's lead
+  thick, the greens have almost no channel separation -- the green channel's lead
   over red in the sunlit canopy is 1.7 code values where footage would have
-  several times that — and there is no backlit leaf translucency, so depth is
+  several times that -- and there is no backlit leaf translucency, so depth is
   carried by fog rather than by silhouette layering and occlusion. It is one
   problem wearing three costumes across the vegetation, lighting and grading
   systems. It was started and backed out again rather than shipped half checked;
@@ -230,6 +251,13 @@ runtime through an importmap in `index.html`. Three.js and nothing else.
 The zero-asset claim is a separate one, and it is airtight. There is no
 `TextureLoader`, `GLTFLoader`, `RGBELoader`, `AudioLoader`, `fetch`,
 `XMLHttpRequest`, `new Image` or `createImageBitmap` anywhere in `src/`.
+
+There is exactly one image element in the project and it is not in the scene:
+the still on the mobile capability screen. Its source is a base64 data URI in
+`src/mobile/poster.js`, a 29 kB frame of this renderer carried in the source
+rather than fetched from `media/`, because a path into `media/` would be the one
+runtime asset load this page does not make. It is imported only by the gate,
+which only a coarse pointer reaches, so a desktop never downloads it.
 
 ## How it was built
 
