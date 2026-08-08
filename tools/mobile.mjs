@@ -1,6 +1,10 @@
 /* Verify the phone path, and verify that the desktop one did not move.
  *
- *   node tools/mobile.mjs [--w 393] [--h 852] [--dpr 3]
+ *   node tools/mobile.mjs [--w 393] [--h 852] [--dpr 3] [--url https://...]
+ *
+ * `--url` points it at a deployment instead of the local tree, which is how a
+ * push gets checked against the thing thousands of people are looking at
+ * rather than against the working copy that produced it.
  *
  * Two runs. The first is a desktop viewport with a mouse, and its only job is
  * to prove a negative: `document.body.innerHTML` byte for byte what it was, no
@@ -24,8 +28,10 @@ import { finish } from './tame.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const flag = (k, d) => { const i = args.indexOf('--' + k); return i < 0 ? d : +args[i + 1]; };
+const textFlag = (k, d = null) => { const i = args.indexOf('--' + k); return i < 0 ? d : args[i + 1]; };
 
 const W = flag('w', 393), H = flag('h', 852), DPR = flag('dpr', 3);
+const URL_ = textFlag('url');
 const outDir = path.join(ROOT, 'shots', 'mobile');
 fs.mkdirSync(outDir, { recursive: true });
 
@@ -58,7 +64,7 @@ async function touchSeq(cdp, points) {
 
 console.log('\n─── desktop, mouse ───');
 let desktopHtml = '';
-await run({ width: 1600, height: 900, hash: '' }, async ({ page, errs }) => {
+await run({ width: 1600, height: 900, hash: '', url: URL_ }, async ({ page, errs }) => {
   /* Reloaded so the request log covers the boot. The harness navigates before
    * handing the page over, so a listener attached here would otherwise see
    * every module request except the ones this is about. */
@@ -86,7 +92,7 @@ await run({ width: 1600, height: 900, hash: '' }, async ({ page, errs }) => {
 
 console.log(`\n─── phone, ${W}x${H} @ dpr ${DPR} ───`);
 await run({
-  width: W, height: H, hash: '', device: IPHONE, autoBegin: false,
+  width: W, height: H, hash: '', device: IPHONE, autoBegin: false, url: URL_,
 }, async ({ page, errs }) => {
   const cdp = await page.context().newCDPSession(page);
 
